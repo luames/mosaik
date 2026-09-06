@@ -17,9 +17,9 @@ export interface CamoufoxBrowserSession extends BrowserSession {
   readonly camoufox: CamoufoxOptions;
 }
 
-export interface CamoufoxInteractiveBrowserSession
-  extends InteractiveBrowserSession, CamoufoxBrowserSession {
-  kind: "persistent";
+export interface CamoufoxInteractiveBrowserSession extends InteractiveBrowserSession {
+  readonly provider: "camoufox";
+  readonly camoufox: CamoufoxOptions;
 }
 
 export interface CamoufoxBrowserSessionOptions {
