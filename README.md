@@ -52,8 +52,8 @@ mosaik setup
 mosaik doctor
 ```
 
-`setup` installs Chromium. `doctor` checks the installation and tells you what
-needs fixing, including missing provider credentials.
+`setup` installs Chromium and fetches Camoufox. `doctor` checks the installation
+and tells you what needs fixing, including missing provider credentials.
 
 Create a directory for your automations. `mosaik init` makes a TypeScript project
 linked to your Mosaik checkout:
@@ -198,6 +198,13 @@ The local CLI saves usernames and passwords as unencrypted JSON inside
 like a password and keep it out of git and shared folders. Credentials go through
 a trusted prompt, not through task inputs. The [authentication reference](docs/reference.md#authentication)
 explains the flow and its limits.
+
+Mosaik can also use [Camoufox](https://camoufox.com/) instead of local
+Chromium. Set `--browser camoufox` or `mosaik config set browser camoufox`.
+Mosaik owns the fingerprint and humanization options and maps them onto
+camoufox-js. Camoufox profiles live under `.mosaik/camoufox-profiles/`,
+separate from Chromium. See the
+[Camoufox guide](docs/reference.md#camoufox-browsers).
 
 Mosaik can also use Kernel browsers. Set `KERNEL_API_KEY` and add
 `--browser kernel` to a run. Kernel login uses its hosted Managed Auth flow.

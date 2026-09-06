@@ -17,12 +17,13 @@ mosaik doctor
 ```
 
 Mosaik requires Node 22.18 or newer. `mosaik setup` installs Playwright's
-Chromium build.
+Chromium build and fetches the Camoufox binary used by `--browser camoufox`.
 
 `mosaik doctor` checks the installed command, Node.js, DSH, bundled runtime
-files, Chromium, provider credentials, and the data directory. Failed checks
-include the exact repair command. Use `mosaik doctor --json` in scripts and
-CI.
+files, Chromium, Camoufox, provider credentials, and the data directory.
+A missing Camoufox binary is a warning unless the project default is
+`camoufox`. Failed checks include the exact repair command. Use
+`mosaik doctor --json` in scripts and CI.
 
 Run `mosaik` with no arguments in an interactive terminal to start an agent
 session. Mosaik first asks for a URL and immediately opens it in a persistent
@@ -109,6 +110,83 @@ mosaik actions list --site example.com --json
 ```
 
 Run `mosaik --help` or `mosaik <command> --help` for all options.
+
+## Camoufox browsers
+
+Camoufox is a first-class local browser provider. It uses
+[camoufox-js](https://github.com/apify/camoufox-js) Playwright APIs
+(`Camoufox()` / `user_data_dir`). It does not connect over Chromium CDP.
+Local Chromium remains the default. Kernel stays on Chromium CDP.
+
+```sh
+mosaik setup
+mosaik config set browser camoufox
+mosaik run "Read the page heading" --url https://example.com --browser camoufox
+mosaik login https://example.com/login --browser camoufox
+```
+
+`createMosaik` and `openBrowserSession` accept the same provider:
+
+```ts
+import { createMosaik, openBrowserSession } from "mosaik";
+
+const mosaik = await createMosaik({
+  browser: "camoufox",
+  camoufox: { os: "windows", humanize: true, locale: "en-US" },
+  headless: true,
+});
+
+const session = await openBrowserSession({
+  browser: "camoufox",
+  profileDirectory: ".mosaik/camoufox-profiles/example.com",
+  camoufox: { humanize: 1.5 },
+});
+```
+
+Camoufox profiles are stored under `.mosaik/camoufox-profiles/`. Chromium
+profiles stay in `.mosaik/browser-profiles/`. The two are not migrated or
+shared.
+
+### Camoufox option mapping
+
+Mosaik owns the fingerprint and Camoufox-native humanization surface. Callers
+do not pass raw camoufox-js `LaunchOptions`. Defaults pin the host OS, enable
+cursor humanization, and leave GeoIP off so launch stays offline.
+
+| Mosaik option              | camoufox-js `LaunchOptions` | Default                                  |
+| -------------------------- | --------------------------- | ---------------------------------------- |
+| `os`                       | `os`                        | Host OS (`windows`, `macos`, or `linux`) |
+| `locale`                   | `locale`                    | Unset; Camoufox generates it             |
+| `geoip`                    | `geoip`                     | `false`                                  |
+| `humanize`                 | `humanize`                  | `true`                                   |
+| `window`                   | `window`                    | Unset; Camoufox samples a size           |
+| `screen`                   | `screen`                    | Unset                                    |
+| `blockImages`              | `block_images`              | `false`                                  |
+| `blockWebRtc`              | `block_webrtc`              | `false`                                  |
+| session `headless`         | `headless`                  | Session default                          |
+| session `profileDirectory` | `user_data_dir`             | `.mosaik/camoufox-profiles/<host>`       |
+
+GeoIP stays off so launch does not need a MaxMind database or a compiled
+`better-sqlite3` addon. Turn it on only when you want timezone and locale
+derived from an IP address.
+
+Persist project defaults in `.mosaik/config.json`:
+
+```json
+{
+  "version": 1,
+  "browser": "camoufox",
+  "camoufox": {
+    "os": "windows",
+    "locale": "en-US",
+    "humanize": true
+  }
+}
+```
+
+Discovery child processes receive `MOSAIK_BROWSER=camoufox` and the same
+mosaik-owned options. They launch Camoufox through camoufox-js, not
+`chromium.connectOverCDP`.
 
 ## Kernel browsers and deployment
 
@@ -339,8 +417,9 @@ mosaik login http://localhost:3000/login --pause
 
 The command opens Chromium before asking for credentials. The agent infers the
 authenticated URL and a stable signed-in marker such as a user menu or logout
-control. Mosaik stores the browser-managed profile under
-`.mosaik/browser-profiles/localhost-3000`. Login, verification, and `--pause`
+control. Mosaik stores the Chromium profile under
+`.mosaik/browser-profiles/localhost-3000`. `--browser camoufox` uses
+`.mosaik/camoufox-profiles/` instead. Login, verification, and `--pause`
 use one tab in one persistent Chromium session. The CLI does not close and
 reopen the profile between those steps, so browser-session cookies stay valid.
 It does not export cookies into a separate JSON file.
@@ -564,8 +643,10 @@ contents and reuses unchanged parsed sources. Automations may import sibling aut
 one level deep; cycles and imports outside the site are rejected. Your application
 still needs its normal TypeScript execution support, such as `tsx`.
 
-`createMosaik` accepts `startUrl`, `profileDirectory`, `timeoutMs`, `maxActionCalls`,
-`outputDirectory`, `repair`, `humanize`, and an abort `signal`. `humanize: true` changes only
+`createMosaik` accepts `startUrl`, `profileDirectory`, `browser`, `camoufox`,
+`timeoutMs`, `maxActionCalls`,
+`outputDirectory`, `repair`, `humanize`, and an abort `signal`. `browser: "camoufox"`
+launches Camoufox through camoufox-js. `humanize: true` changes only
 runtime interaction delivery: mouse paths use `ghost-cursor`, scrolling and typing are paced,
 wheel and cursor motion may overlap, and browser waits may include bounded cursor movement or
 vertical viewport scrolling. A session-owned run initializes one random pointer position before its
