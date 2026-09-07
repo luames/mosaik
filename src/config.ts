@@ -178,7 +178,9 @@ function validateMosaikConfig(value: unknown): MosaikConfig {
     throw new Error("model is required when provider is set");
   }
   const camoufox =
-    record.camoufox === undefined ? undefined : validateCamoufoxOptions(record.camoufox, "camoufox");
+    record.camoufox === undefined
+      ? undefined
+      : validateCamoufoxOptions(record.camoufox, "camoufox");
   if (record.kernel === undefined) {
     return {
       version: 1,

@@ -45,9 +45,7 @@ export async function openCamoufoxBrowserSession(
   const camoufox = options.camoufox ?? {};
   const launch = toCamoufoxLaunchOptions(camoufox, { headless: options.headless ?? true });
   const browser = (await Camoufox(launch)) as Browser;
-  const session = ephemeralSession(browser, {
-    ...(options.humanize === undefined ? {} : { humanize: options.humanize }),
-  });
+  const session = ephemeralSession(browser, (options.humanize === undefined ? {} : { humanize: options.humanize }));
   return {
     ...session,
     provider: "camoufox",
