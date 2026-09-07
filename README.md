@@ -118,7 +118,9 @@ try {
 
 Set `humanize: true` to use curved `ghost-cursor` mouse paths, paced scrolling,
 variable typing, and occasional cursor movement during browser waits in place
-of direct Playwright interactions. The generated automation stays unchanged:
+of direct Playwright interactions. The generated automation stays unchanged.
+This is Mosaik runtime humanization, not Camoufox-native cursor motion
+(`camoufox.humanize`):
 
 ```ts
 const mosaik = await createMosaik({ headless: false, humanize: true });
@@ -201,8 +203,10 @@ explains the flow and its limits.
 
 Mosaik can also use [Camoufox](https://camoufox.com/) instead of local
 Chromium. Set `--browser camoufox` or `mosaik config set browser camoufox`.
-Mosaik owns the fingerprint and humanization options and maps them onto
-camoufox-js. Camoufox profiles live under `.mosaik/camoufox-profiles/`,
+Mosaik owns the fingerprint options and maps them onto camoufox-js.
+`--humanize` still uses mosaik's `ghost-cursor` path; optional
+`camoufox.humanize` is a separate Camoufox-native knob and stays off by
+default. Camoufox profiles live under `.mosaik/camoufox-profiles/`,
 separate from Chromium. See the
 [Camoufox guide](docs/reference.md#camoufox-browsers).
 

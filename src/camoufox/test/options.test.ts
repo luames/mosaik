@@ -9,13 +9,14 @@ import {
   validateCamoufoxOptions,
 } from "../options.js";
 
-test("default Camoufox options pin the host OS and enable native humanization", () => {
+test("default Camoufox options pin the host OS and leave native humanization off", () => {
   const defaults = defaultCamoufoxOptions();
   assert.equal(defaults.os, hostCamoufoxOs());
-  assert.equal(defaults.humanize, true);
+  assert.equal(defaults.humanize, false);
   assert.equal(defaults.geoip, false);
   assert.equal(defaults.blockImages, false);
   assert.equal(defaults.blockWebRtc, false);
+  assert.equal(toCamoufoxLaunchOptions({}).humanize, false);
 });
 
 test("mosaik-owned Camoufox options map onto camoufox-js LaunchOptions", () => {
@@ -65,6 +66,9 @@ test("resolveCamoufoxOptions fills only the mosaik-owned defaults", () => {
     ...defaultCamoufoxOptions(),
     locale: "de-DE",
   });
+  assert.equal(resolveCamoufoxOptions({}).humanize, false);
+  assert.equal(resolveCamoufoxOptions({ humanize: true }).humanize, true);
+  assert.equal(resolveCamoufoxOptions({ humanize: 1.5 }).humanize, 1.5);
 });
 
 test("validateCamoufoxOptions rejects unknown keys and invalid values", () => {
