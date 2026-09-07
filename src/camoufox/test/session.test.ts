@@ -9,8 +9,10 @@ import {
   openBrowserSession,
   openInteractiveBrowserSession,
 } from "../../runtime/session.js";
+import { isPageHumanized } from "../../runtime/humanize.js";
 import { startFixtureServer } from "../../runtime/fixtures.js";
 import { inspectCamoufoxInstall } from "../install.js";
+import { toCamoufoxLaunchOptions } from "../options.js";
 
 const camoufox = await inspectCamoufoxInstall();
 
@@ -73,6 +75,27 @@ test.skipIf(!camoufox.ready)(
       await session.close();
       await fixture.close();
       await rm(profileDirectory, { recursive: true, force: true });
+    }
+  },
+);
+
+test.skipIf(!camoufox.ready)(
+  "mosaik humanize on Camoufox sessions uses ghost-cursor and does not enable camoufox-js humanize",
+  async () => {
+    const session = await openBrowserSession({
+      browser: "camoufox",
+      headless: true,
+      humanize: true,
+      camoufox: { os: "linux", geoip: false },
+    });
+    try {
+      assert.deepEqual(session.camoufox, { os: "linux", geoip: false });
+      assert.equal(toCamoufoxLaunchOptions(session.camoufox).humanize, false);
+      await session.withPage(async (page) => {
+        assert.equal(isPageHumanized(page), true);
+      });
+    } finally {
+      await session.close();
     }
   },
 );

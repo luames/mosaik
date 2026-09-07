@@ -90,8 +90,10 @@ objects, and arrays are decoded as their JSON types. Use
 for machine-readable output.
 
 Pass `--humanize` to change interaction delivery without changing the generated action plan.
+This is mosaik's `ghost-cursor` runtime path. It is not Camoufox-native cursor
+humanization (`camoufox.humanize` in the Camoufox option mapping below).
 Set a project default with `mosaik config set humanize true`; `--no-humanize` overrides it for
-one run. The setting applies to local and Kernel browser sessions. A deployed Kernel app accepts
+one run. The setting applies to Chromium, Camoufox, and Kernel browser sessions. A deployed Kernel app accepts
 `"humanize": true` in its run payload. For session-owned pages, Mosaik places the pointer at a
 random viewport position before loading the start URL. The browser context retains that position
 through document navigation and carries it into replacement pages or tabs. Coordinates outside the
@@ -132,14 +134,15 @@ import { createMosaik, openBrowserSession } from "mosaik";
 
 const mosaik = await createMosaik({
   browser: "camoufox",
-  camoufox: { os: "windows", humanize: true, locale: "en-US" },
+  humanize: true,
+  camoufox: { os: "windows", locale: "en-US" },
   headless: true,
 });
 
 const session = await openBrowserSession({
   browser: "camoufox",
   profileDirectory: ".mosaik/camoufox-profiles/example.com",
-  camoufox: { humanize: 1.5 },
+  camoufox: { os: "linux" },
 });
 ```
 
@@ -149,22 +152,27 @@ shared.
 
 ### Camoufox option mapping
 
-Mosaik owns the fingerprint and Camoufox-native humanization surface. Callers
-do not pass raw camoufox-js `LaunchOptions`. Defaults pin the host OS, enable
-cursor humanization, and leave GeoIP off so launch stays offline.
+Mosaik owns the fingerprint and optional Camoufox-native surface. Callers
+do not pass raw camoufox-js `LaunchOptions`. Defaults pin the host OS, leave
+Camoufox-native cursor humanization off, and leave GeoIP off so launch stays
+offline. Mosaik `--humanize` / config `humanize` / `createMosaik({ humanize })`
+never sets this `camoufox.humanize` field.
 
 | Mosaik option              | camoufox-js `LaunchOptions` | Default                                  |
 | -------------------------- | --------------------------- | ---------------------------------------- |
 | `os`                       | `os`                        | Host OS (`windows`, `macos`, or `linux`) |
 | `locale`                   | `locale`                    | Unset; Camoufox generates it             |
 | `geoip`                    | `geoip`                     | `false`                                  |
-| `humanize`                 | `humanize`                  | `true`                                   |
+| `humanize`                 | `humanize`                  | `false`                                  |
 | `window`                   | `window`                    | Unset; Camoufox samples a size           |
 | `screen`                   | `screen`                    | Unset                                    |
 | `blockImages`              | `block_images`              | `false`                                  |
 | `blockWebRtc`              | `block_webrtc`              | `false`                                  |
 | session `headless`         | `headless`                  | Session default                          |
 | session `profileDirectory` | `user_data_dir`             | `.mosaik/camoufox-profiles/<host>`       |
+
+`camoufox.humanize` is an optional Camoufox-native cursor knob. Set it only when
+you want camoufox-js built-in motion. Mosaik `--humanize` does not turn it on.
 
 GeoIP stays off so launch does not need a MaxMind database or a compiled
 `better-sqlite3` addon. Turn it on only when you want timezone and locale
@@ -178,8 +186,7 @@ Persist project defaults in `.mosaik/config.json`:
   "browser": "camoufox",
   "camoufox": {
     "os": "windows",
-    "locale": "en-US",
-    "humanize": true
+    "locale": "en-US"
   }
 }
 ```
@@ -646,7 +653,8 @@ still needs its normal TypeScript execution support, such as `tsx`.
 `createMosaik` accepts `startUrl`, `profileDirectory`, `browser`, `camoufox`,
 `timeoutMs`, `maxActionCalls`,
 `outputDirectory`, `repair`, `humanize`, and an abort `signal`. `browser: "camoufox"`
-launches Camoufox through camoufox-js. `humanize: true` changes only
+launches Camoufox through camoufox-js. `humanize: true` is mosaik `ghost-cursor`
+runtime humanization, not `camoufox.humanize`. It changes only
 runtime interaction delivery: mouse paths use `ghost-cursor`, scrolling and typing are paced,
 wheel and cursor motion may overlap, and browser waits may include bounded cursor movement or
 vertical viewport scrolling. A session-owned run initializes one random pointer position before its

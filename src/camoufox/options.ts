@@ -21,9 +21,9 @@ export interface CamoufoxOptions {
    */
   geoip?: boolean | string;
   /**
-   * Camoufox-native cursor humanization.
+   * Optional Camoufox-native cursor humanization. This is not mosaik `--humanize`.
    * `true` enables the default motion, or pass the maximum cursor travel time in seconds.
-   * Default is `true`.
+   * Default is `false`.
    */
   humanize?: boolean | number;
   /** Fixed window size `[width, height]`. Omit to let Camoufox sample one. */
@@ -83,7 +83,7 @@ export function hostCamoufoxOs(): CamoufoxOs {
 export function defaultCamoufoxOptions(): ResolvedCamoufoxOptions {
   return {
     os: hostCamoufoxOs(),
-    humanize: true,
+    humanize: false,
     geoip: false,
     blockImages: false,
     blockWebRtc: false,
