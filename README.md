@@ -32,13 +32,12 @@ Some tasks we want this to be good at:
 
 ## Try it
 
-The default model is `openai/gpt-5.6-luna:nitro` through OpenRouter, used for
-composition, action discovery, and outcome review. This is the model we've
-tested with. You can choose another with `mosaik run --model <model>`, but expect
-some breakage when switching models. Login checks default to the same model and
-can be overridden separately with `MOSAIK_AUTH_MODEL`.
+The currently supported model is GPT-5.6 Luna. Use it via OpenRouter, or connect your Codex subscription.
 
-You'll need Node 22.18 or newer, pnpm, and an OpenRouter API key.
+Pick the provider with `mosaik run --model …` or `/model` in the interactive CLI.
+
+You'll need Node 22.18 or newer, pnpm, and either an OpenRouter API key or a
+Codex sign-in.
 
 Clone this repo and install the CLI:
 
@@ -53,7 +52,7 @@ mosaik doctor
 ```
 
 `setup` installs Chromium. `doctor` checks the installation and tells you what
-needs fixing, including a missing API key.
+needs fixing, including missing provider credentials.
 
 Create a directory for your automations. `mosaik init` makes a TypeScript project
 linked to your Mosaik checkout:
@@ -63,10 +62,12 @@ mkdir my-automations
 cd my-automations
 mosaik init
 export OPENROUTER_API_KEY=your-key
+# or: mosaik provider login
 mosaik
 ```
 
-You can also put the key in this directory's `.env` file.
+You can also put the OpenRouter key in this directory's `.env` file. Codex
+stores its grant in `~/.dsh` after `mosaik provider login`.
 
 You're now in the interactive CLI. When it asks for a URL, enter:
 
@@ -77,7 +78,7 @@ https://books.toscrape.com/
 Once the browser opens, give it this task:
 
 ```text
-download the first 100 book covers. Move through the catalog with Next; don't open each book's
+download the first 100 book covers
 detail page separately.
 ```
 

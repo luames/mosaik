@@ -1,6 +1,7 @@
 import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
+import { parseLlmProvider, resolveLlmRoute, type LlmProvider } from "./agents/dsh/llm-route.js";
 import { domainMatches, normalizeDomain } from "./kernel/hosted-login.js";
 
 export interface InteractiveCliHistory {
@@ -21,6 +22,8 @@ export interface MosaikConfig {
   version: 1;
   browser?: "local" | "kernel";
   humanize?: boolean;
+  provider?: LlmProvider;
+  model?: string;
   kernel?: {
     connections: Record<string, KernelAuthConnection>;
   };
@@ -67,6 +70,16 @@ export async function saveHumanizationDefault(
 ): Promise<string> {
   const config = await loadMosaikConfig(dataDirectory);
   return saveMosaikConfig(dataDirectory, { ...config, humanize });
+}
+
+export async function saveDefaultModel(dataDirectory: string, model: string): Promise<string> {
+  const route = resolveLlmRoute(model);
+  const config = await loadMosaikConfig(dataDirectory);
+  return saveMosaikConfig(dataDirectory, {
+    ...config,
+    provider: route.provider,
+    model: route.model,
+  });
 }
 
 export function resolveMosaikBrowser(
@@ -142,11 +155,26 @@ function validateMosaikConfig(value: unknown): MosaikConfig {
   if (record.humanize !== undefined && typeof record.humanize !== "boolean") {
     throw new Error("humanize must be a boolean");
   }
+  if (record.provider !== undefined && typeof record.provider !== "string") {
+    throw new Error("provider must be openrouter or openai-codex");
+  }
+  const provider = record.provider === undefined ? undefined : parseLlmProvider(record.provider);
+  if (record.model !== undefined) {
+    if (typeof record.model !== "string" || record.model.trim().length === 0) {
+      throw new Error("model must be a non-empty string");
+    }
+  }
+  const model = typeof record.model === "string" ? record.model.trim() : undefined;
+  if (provider !== undefined && model === undefined) {
+    throw new Error("model is required when provider is set");
+  }
   if (record.kernel === undefined) {
     return {
       version: 1,
       ...(record.browser === undefined ? {} : { browser: record.browser }),
       ...(record.humanize === undefined ? {} : { humanize: record.humanize }),
+      ...(provider === undefined ? {} : { provider }),
+      ...(model === undefined ? {} : { model }),
     };
   }
   if (record.kernel === null || typeof record.kernel !== "object" || Array.isArray(record.kernel)) {
@@ -171,6 +199,8 @@ function validateMosaikConfig(value: unknown): MosaikConfig {
     version: 1,
     ...(record.browser === undefined ? {} : { browser: record.browser }),
     ...(record.humanize === undefined ? {} : { humanize: record.humanize }),
+    ...(provider === undefined ? {} : { provider }),
+    ...(model === undefined ? {} : { model }),
     kernel: { connections },
   };
 }

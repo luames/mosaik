@@ -1,5 +1,14 @@
 import { Box, Static, Text, render, useAnimation, useApp, useInput, usePaste } from "ink";
 import { useCallback, useRef, useState, type ReactNode } from "react";
+import {
+  formatLlmChoicesDetail,
+  formatLlmRouteLabel,
+  llmChoiceNumber,
+  llmModelFlag,
+  matchLlmChoices,
+  resolveLlmRoute,
+  resolvePickedLlmModel,
+} from "./agents/dsh/llm-route.js";
 import { rememberInteractiveHistory, type InteractiveCliHistory } from "./config.js";
 
 export interface InteractiveCliResult {
@@ -22,6 +31,8 @@ export interface InteractiveCliRunOptions {
 export interface InteractiveCliSession {
   id: string;
   currentUrl(): string;
+  model(): string;
+  setModel(model: string): void;
   run(task: string, options: InteractiveCliRunOptions): Promise<InteractiveCliResult>;
   login(): Promise<InteractiveCliResult>;
   close(): Promise<void>;
@@ -30,8 +41,10 @@ export interface InteractiveCliSession {
 export interface InteractiveCliActions {
   version: string;
   workingDirectory: string;
+  model: string;
   history: InteractiveCliHistory;
   saveHistory(history: InteractiveCliHistory): Promise<void>;
+  setModel(model: string): Promise<string>;
   openSession(startUrl: string): Promise<InteractiveCliSession>;
 }
 
@@ -61,12 +74,14 @@ type InteractiveInput =
   | { kind: "clear" }
   | { kind: "quit" }
   | { kind: "help" }
+  | { kind: "model"; model?: string }
   | { kind: "error"; message: string };
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 const COMMANDS = [
   { name: "/login", description: "Log in on the current page" },
+  { name: "/model", description: "Pick a composition model" },
   { name: "/new", description: "Close this run and start a new session" },
   { name: "/clear", description: "Clear this conversation" },
   { name: "/help", description: "Show interactive commands" },
@@ -108,6 +123,7 @@ function MosaikApp({
   const { exit, suspendTerminal, waitUntilRenderFlush } = useApp();
   const [screen, setScreen] = useState<Screen>({ kind: "start" });
   const [session, setSession] = useState<InteractiveCliSession>();
+  const [model, setModel] = useState(actions.model);
   const [currentUrl, setCurrentUrl] = useState<string>();
   const [transcript, setTranscript] = useState<TranscriptTurn[]>([]);
   const [pending, setPending] = useState<string>();
@@ -287,11 +303,40 @@ function MosaikApp({
             detail: COMMANDS.map((command) => `${command.name}  ${command.description}`).join("\n"),
           });
           return;
+        case "model":
+          if (parsed.model === undefined) {
+            addTurn({
+              role: "mosaik",
+              text: `Using ${formatLlmRouteLabel(model)}`,
+              status: "info",
+              detail: `${formatLlmChoicesDetail(model)}\n↑/↓ after /model to pick, or /model <number>`,
+            });
+            return;
+          }
+          void (async () => {
+            try {
+              const next = await actions.setModel(resolvePickedLlmModel(parsed.model!));
+              session?.setModel(next);
+              setModel(next);
+              addTurn({
+                role: "mosaik",
+                text: `Using ${formatLlmRouteLabel(next)}`,
+                status: "info",
+              });
+            } catch (error) {
+              addTurn({
+                role: "mosaik",
+                text: error instanceof Error ? error.message : String(error),
+                status: "error",
+              });
+            }
+          })();
+          return;
         case "error":
           addTurn({ role: "mosaik", text: parsed.message, status: "error" });
       }
     },
-    [addTurn, exit, runLogin, runTask, startNewSession],
+    [actions, addTurn, exit, model, runLogin, runTask, session, startNewSession],
   );
 
   switch (screen.kind) {
@@ -299,18 +344,24 @@ function MosaikApp({
       return (
         <StartScreen
           actions={actions}
+          model={model}
           history={history.urls}
           {...(screen.error === undefined ? {} : { error: screen.error })}
           onSubmit={(url) => void openSession(url)}
+          onPickModel={async (picked) => {
+            const next = await actions.setModel(resolvePickedLlmModel(picked));
+            setModel(next);
+          }}
         />
       );
     case "opening":
-      return <OpeningScreen actions={actions} url={screen.url} />;
+      return <OpeningScreen actions={actions} model={model} url={screen.url} />;
     case "chat":
       return (
         <ChatScreen
           actions={actions}
           currentUrl={currentUrl ?? "Browser open"}
+          model={model}
           sessionId={session?.id ?? "unknown"}
           transcript={transcript}
           history={history.prompts}
@@ -323,22 +374,38 @@ function MosaikApp({
 
 function StartScreen({
   actions,
+  model,
   history,
   error,
   onSubmit,
+  onPickModel,
 }: {
   actions: InteractiveCliActions;
+  model: string;
   history: string[];
   error?: string;
   onSubmit(url: string): void;
+  onPickModel(model: string): Promise<void>;
 }) {
   const [editor, setEditor] = useState<InputEditorState>({ value: "", cursor: 0 });
   const [validationError, setValidationError] = useState<string>();
+  const [selectedCommand, setSelectedCommand] = useState<string>();
+  const [selectedModel, setSelectedModel] = useState<string>();
   const historyCycle = useRef<HistoryCycleState | undefined>(undefined);
+  const commandCycle = useRef<CommandCycleState | undefined>(undefined);
+  const modelCycle = useRef<CommandCycleState | undefined>(undefined);
   const value = editor.value;
 
   const resetHistoryCycle = useCallback(() => {
     historyCycle.current = undefined;
+  }, []);
+  const resetCommandCycle = useCallback(() => {
+    commandCycle.current = undefined;
+    setSelectedCommand(undefined);
+  }, []);
+  const resetModelCycle = useCallback(() => {
+    modelCycle.current = undefined;
+    setSelectedModel(undefined);
   }, []);
 
   const append = useCallback(
@@ -346,24 +413,71 @@ function StartScreen({
       const cleaned = cleanInput(text, false);
       if (cleaned.length === 0) return;
       resetHistoryCycle();
+      resetCommandCycle();
+      resetModelCycle();
       setEditor((current) => insertAtCursor(current, cleaned));
       setValidationError(undefined);
     },
-    [resetHistoryCycle],
+    [resetCommandCycle, resetHistoryCycle, resetModelCycle],
   );
 
   useInput((input, key) => {
     if (key.leftArrow || key.rightArrow) {
       resetHistoryCycle();
+      resetCommandCycle();
+      resetModelCycle();
       setEditor((current) => moveCursor(current, key.leftArrow ? "left" : "right"));
       return;
     }
     if (key.home || key.end) {
       resetHistoryCycle();
+      resetCommandCycle();
+      resetModelCycle();
       setEditor((current) => moveCursor(current, key.home ? "home" : "end"));
       return;
     }
+    if (key.tab || input === "\t") {
+      if (isModelPickerInput(value)) {
+        const cycled = cycleModelChoice(value, key.shift ? "previous" : "next", modelCycle.current);
+        if (cycled !== undefined) {
+          modelCycle.current = cycled.state;
+          setSelectedModel(cycled.value);
+          setEditor(editorAtEnd(cycled.value));
+          setValidationError(undefined);
+        }
+        return;
+      }
+      const completed = completeSlashCommand(
+        value,
+        key.shift ? "previous" : "next",
+        commandCycle.current,
+      );
+      if (completed !== undefined) {
+        commandCycle.current = completed.state;
+        setSelectedCommand(completed.value);
+        resetModelCycle();
+        setEditor(editorAtEnd(completed.value));
+        setValidationError(undefined);
+      }
+      return;
+    }
+    if ((key.upArrow || key.downArrow) && isModelPickerInput(value)) {
+      const cycled = cycleModelChoice(
+        value,
+        key.downArrow ? "next" : "previous",
+        modelCycle.current,
+      );
+      if (cycled !== undefined) {
+        modelCycle.current = cycled.state;
+        setSelectedModel(cycled.value);
+        setEditor(editorAtEnd(cycled.value));
+        setValidationError(undefined);
+      }
+      return;
+    }
     if (key.upArrow || key.downArrow) {
+      resetCommandCycle();
+      resetModelCycle();
       const cycled = cycleInputHistory(
         history,
         value,
@@ -378,6 +492,31 @@ function StartScreen({
       return;
     }
     if (key.return) {
+      const opened = modelPickerOpenValue(value);
+      if (opened !== undefined) {
+        resetCommandCycle();
+        resetModelCycle();
+        setEditor(editorAtEnd(opened));
+        setValidationError(undefined);
+        return;
+      }
+      const parsed = parseInteractiveInput(value);
+      if (parsed.kind === "model") {
+        if (parsed.model === undefined) {
+          setValidationError("↑/↓ to pick a model, then enter");
+          return;
+        }
+        void onPickModel(parsed.model)
+          .then(() => {
+            setEditor({ value: "", cursor: 0 });
+            resetModelCycle();
+            setValidationError(undefined);
+          })
+          .catch((caught: unknown) => {
+            setValidationError(caught instanceof Error ? caught.message : String(caught));
+          });
+        return;
+      }
       const url = value.trim();
       const problem = validateWebUrl(url.length === 0 ? undefined : url);
       if (problem !== undefined) setValidationError(problem);
@@ -386,18 +525,24 @@ function StartScreen({
     }
     if (key.backspace) {
       resetHistoryCycle();
+      resetCommandCycle();
+      resetModelCycle();
       setEditor((current) => removeBeforeCursor(current));
       setValidationError(undefined);
       return;
     }
     if (key.delete) {
       resetHistoryCycle();
+      resetCommandCycle();
+      resetModelCycle();
       setEditor((current) => removeAtCursor(current));
       setValidationError(undefined);
       return;
     }
     if (key.ctrl && input === "u") {
       resetHistoryCycle();
+      resetCommandCycle();
+      resetModelCycle();
       setEditor({ value: "", cursor: 0 });
       setValidationError(undefined);
       return;
@@ -410,11 +555,32 @@ function StartScreen({
     <StartView
       version={actions.version}
       workingDirectory={actions.workingDirectory}
+      model={model}
       value={value}
       cursor={editor.cursor}
       {...(validationError === undefined && error === undefined
         ? {}
         : { error: validationError ?? error })}
+      {...(isModelPickerInput(value)
+        ? {
+            suggestions: (
+              <ModelSuggestions
+                query={modelCycle.current?.query ?? modelPickerQuery(value)}
+                current={model}
+                {...(selectedModel === undefined ? {} : { selected: selectedModel })}
+              />
+            ),
+          }
+        : value.startsWith("/") && !value.includes("\n")
+          ? {
+              suggestions: (
+                <CommandSuggestions
+                  input={commandCycle.current?.query ?? value}
+                  {...(selectedCommand === undefined ? {} : { selected: selectedCommand })}
+                />
+              ),
+            }
+          : {})}
     />
   );
 }
@@ -422,18 +588,22 @@ function StartScreen({
 export function StartView({
   version,
   workingDirectory,
+  model,
   value,
   cursor = inputLength(value),
   error,
+  suggestions,
 }: {
   version: string;
   workingDirectory: string;
+  model?: string;
   value: string;
   cursor?: number;
   error?: string | undefined;
+  suggestions?: ReactNode;
 }) {
   return (
-    <Frame actions={{ version, workingDirectory }}>
+    <Frame actions={{ version, workingDirectory }} {...(model === undefined ? {} : { model })}>
       <Box flexDirection="column" marginTop={1}>
         <Text bold>Where should we start?</Text>
         <Text dimColor>Enter a URL. Mosaik opens the browser immediately.</Text>
@@ -447,15 +617,30 @@ export function StartView({
           </Box>
         )}
       </Box>
-      <Footer>enter open browser · ←/→ cursor · ↑/↓ history · ctrl+u clear · ctrl+c quit</Footer>
+      {suggestions}
+      <Footer>
+        {isModelPickerInput(value)
+          ? modelPickerFooter()
+          : value.startsWith("/")
+            ? "tab complete · enter run · ↑/↓ pick · ctrl+u clear · ctrl+c quit"
+            : "enter open browser · ←/→ cursor · ↑/↓ history · tab complete /commands · ctrl+c quit"}
+      </Footer>
     </Frame>
   );
 }
 
-function OpeningScreen({ actions, url }: { actions: InteractiveCliActions; url: string }) {
+function OpeningScreen({
+  actions,
+  model,
+  url,
+}: {
+  actions: InteractiveCliActions;
+  model: string;
+  url: string;
+}) {
   const { frame } = useAnimation({ interval: 80 });
   return (
-    <Frame actions={actions}>
+    <Frame actions={actions} model={model}>
       <Box marginTop={1}>
         <Text color="cyan">{SPINNER_FRAMES[frame % SPINNER_FRAMES.length]} </Text>
         <Text>Opening {url}</Text>
@@ -467,6 +652,7 @@ function OpeningScreen({ actions, url }: { actions: InteractiveCliActions; url: 
 function ChatScreen({
   actions,
   currentUrl,
+  model,
   sessionId,
   transcript,
   history,
@@ -475,6 +661,7 @@ function ChatScreen({
 }: {
   actions: InteractiveCliActions;
   currentUrl: string;
+  model: string;
   sessionId: string;
   transcript: TranscriptTurn[];
   history: string[];
@@ -482,7 +669,7 @@ function ChatScreen({
   onSubmit(value: string): void;
 }) {
   return (
-    <Frame actions={actions} currentUrl={currentUrl}>
+    <Frame actions={actions} currentUrl={currentUrl} model={model}>
       <Box flexDirection="column" marginTop={1}>
         {transcript.length === 0 ? (
           <Box flexDirection="column">
@@ -497,6 +684,7 @@ function ChatScreen({
         active={pending === undefined}
         sessionId={sessionId}
         history={history}
+        model={model}
         onSubmit={onSubmit}
       />
     </Frame>
@@ -543,21 +731,27 @@ function ChatInput({
   active,
   sessionId,
   history,
+  model,
   onSubmit,
 }: {
   active: boolean;
   sessionId: string;
   history: string[];
+  model: string;
   onSubmit(value: string): void;
 }) {
   const [editor, setEditor] = useState<InputEditorState>({ value: "", cursor: 0 });
   const [selectedCommand, setSelectedCommand] = useState<string>();
+  const [selectedModel, setSelectedModel] = useState<string>();
   const commandCycle = useRef<CommandCycleState | undefined>(undefined);
+  const modelCycle = useRef<CommandCycleState | undefined>(undefined);
   const historyCycle = useRef<HistoryCycleState | undefined>(undefined);
   const value = editor.value;
   const resetCommandCycle = useCallback(() => {
     commandCycle.current = undefined;
+    modelCycle.current = undefined;
     setSelectedCommand(undefined);
+    setSelectedModel(undefined);
   }, []);
   const resetHistoryCycle = useCallback(() => {
     historyCycle.current = undefined;
@@ -586,6 +780,45 @@ function ChatInput({
         resetCommandCycle();
         resetHistoryCycle();
         setEditor((current) => moveCursor(current, key.home ? "home" : "end"));
+        return;
+      }
+      if (key.tab || input === "\t") {
+        if (isModelPickerInput(value)) {
+          const cycled = cycleModelChoice(
+            value,
+            key.shift ? "previous" : "next",
+            modelCycle.current,
+          );
+          if (cycled !== undefined) {
+            modelCycle.current = cycled.state;
+            setSelectedModel(cycled.value);
+            setEditor(editorAtEnd(cycled.value));
+          }
+          return;
+        }
+        const completed = completeSlashCommand(
+          value,
+          key.shift ? "previous" : "next",
+          commandCycle.current,
+        );
+        if (completed !== undefined) {
+          commandCycle.current = completed.state;
+          setSelectedCommand(completed.value);
+          setEditor(editorAtEnd(completed.value));
+        }
+        return;
+      }
+      if ((key.upArrow || key.downArrow) && isModelPickerInput(value)) {
+        const cycled = cycleModelChoice(
+          value,
+          key.downArrow ? "next" : "previous",
+          modelCycle.current,
+        );
+        if (cycled !== undefined) {
+          modelCycle.current = cycled.state;
+          setSelectedModel(cycled.value);
+          setEditor(editorAtEnd(cycled.value));
+        }
         return;
       }
       if ((key.upArrow || key.downArrow) && value.startsWith("/") && !value.includes("\n")) {
@@ -627,6 +860,13 @@ function ChatInput({
         return;
       }
       if (key.return) {
+        const opened = modelPickerOpenValue(value);
+        if (opened !== undefined) {
+          resetCommandCycle();
+          resetHistoryCycle();
+          setEditor(editorAtEnd(opened));
+          return;
+        }
         const submitted = value.trim();
         if (submitted.length === 0) return;
         resetCommandCycle();
@@ -666,7 +906,8 @@ function ChatInput({
   usePaste(append, { isActive: active });
 
   const lines = editableLines(value, editor.cursor);
-  const showCommands = value.startsWith("/") && !value.includes("\n");
+  const showModels = isModelPickerInput(value);
+  const showCommands = value.startsWith("/") && !value.includes("\n") && !showModels;
   return (
     <Box flexDirection="column" marginTop={1}>
       {active ? (
@@ -687,13 +928,64 @@ function ChatInput({
           ))}
         </Box>
       ) : null}
+      {showModels ? (
+        <ModelSuggestions
+          query={modelCycle.current?.query ?? modelPickerQuery(value)}
+          current={model}
+          {...(selectedModel === undefined ? {} : { selected: selectedModel })}
+        />
+      ) : null}
       {showCommands ? (
         <CommandSuggestions
           input={commandCycle.current?.query ?? value}
           {...(selectedCommand === undefined ? {} : { selected: selectedCommand })}
         />
       ) : null}
-      <Footer>{sessionFooter(sessionId, active)}</Footer>
+      <Footer>{showModels ? modelPickerFooter() : sessionFooter(sessionId, active)}</Footer>
+    </Box>
+  );
+}
+
+function ModelSuggestions({
+  query,
+  selected,
+  current,
+}: {
+  query: string;
+  selected?: string;
+  current?: string;
+}) {
+  const choices = matchLlmChoices(query);
+  if (choices.length === 0) return null;
+  const currentFlag = current === undefined ? undefined : llmModelFlag(resolveLlmRoute(current));
+  return (
+    <Box flexDirection="column" marginTop={1} marginLeft={2}>
+      {choices.map((choice) => {
+        const flag = llmModelFlag(choice);
+        const value = `/model ${flag}`;
+        const isSelected = selected === value;
+        return (
+          <Box key={flag}>
+            <Text color="cyan">{isSelected ? "› " : "  "}</Text>
+            <Box width={3}>
+              <Text color="cyan" bold={isSelected}>
+                {llmChoiceNumber(choice)}
+              </Text>
+            </Box>
+            <Box width={14}>
+              <Text dimColor={!isSelected}>{choice.provider}</Text>
+            </Box>
+            {isSelected ? (
+              <Text color="cyan" bold>
+                {choice.model}
+              </Text>
+            ) : (
+              <Text>{choice.model}</Text>
+            )}
+            {flag === currentFlag ? <Text dimColor> current</Text> : null}
+          </Box>
+        );
+      })}
     </Box>
   );
 }
@@ -722,10 +1014,12 @@ function CommandSuggestions({ input, selected }: { input: string; selected?: str
 function Frame({
   actions,
   currentUrl,
+  model,
   children,
 }: {
   actions: Pick<InteractiveCliActions, "version" | "workingDirectory">;
   currentUrl?: string;
+  model?: string;
   children: ReactNode;
 }) {
   return (
@@ -737,6 +1031,7 @@ function Frame({
         <Text dimColor> {actions.version}</Text>
       </Box>
       <Text dimColor>{currentUrl ?? actions.workingDirectory}</Text>
+      {model === undefined ? null : <Text dimColor>{formatLlmRouteLabel(model)}</Text>}
       {children}
     </Box>
   );
@@ -775,6 +1070,9 @@ export function parseInteractiveInput(value: string): InteractiveInput {
   if (trimmed.toLowerCase() === "login") return { kind: "login" };
   if (!trimmed.startsWith("/")) return { kind: "task", task: trimmed };
   const [command, ...args] = trimmed.split(/\s+/);
+  if (command?.toLowerCase() === "/model") {
+    return args.length === 0 ? { kind: "model" } : { kind: "model", model: args.join(" ") };
+  }
   if (args.length > 0) return { kind: "error", message: `${command} does not take arguments` };
   switch (command?.toLowerCase()) {
     case "/login":
@@ -843,6 +1141,84 @@ export function cycleInputHistory(
   };
 }
 
+export function isModelPickerInput(value: string): boolean {
+  return /^\/model\s/i.test(value) && !value.includes("\n");
+}
+
+export function modelPickerOpenValue(value: string): string | undefined {
+  return /^\/model$/i.test(value.trim()) && !value.includes("\n") ? "/model " : undefined;
+}
+
+export function modelPickerQuery(value: string): string {
+  const match = value.trim().match(/^\/model(?:\s+(.*))?$/i);
+  return match?.[1] ?? "";
+}
+
+export function cycleModelChoice(
+  input: string,
+  direction: "next" | "previous",
+  previous?: CommandCycleState,
+): { value: string; state: CommandCycleState } | undefined {
+  if (!isModelPickerInput(input)) return undefined;
+  const query = previous?.query ?? modelPickerQuery(input).toLowerCase();
+  const matches = matchLlmChoices(query);
+  if (matches.length === 0) return undefined;
+  const offset = direction === "next" ? 1 : -1;
+  const index =
+    previous === undefined
+      ? direction === "next"
+        ? 0
+        : matches.length - 1
+      : (previous.index + offset + matches.length) % matches.length;
+  return {
+    value: `/model ${llmModelFlag(matches[index]!)}`,
+    state: { query, index },
+  };
+}
+
+export function modelPickerFooter(): string {
+  return "tab or ↑/↓ pick model · enter use · type to filter · esc clear";
+}
+
+export function completeSlashCommand(
+  input: string,
+  direction: "next" | "previous" = "next",
+  previous?: CommandCycleState,
+): { value: string; state: CommandCycleState } | undefined {
+  if (!input.startsWith("/") || input.includes("\n")) return undefined;
+  const query = previous?.query ?? input.trim().toLowerCase();
+  const matches = COMMANDS.filter((command) => command.name.startsWith(query));
+  if (matches.length === 0) return undefined;
+  if (previous === undefined) {
+    if (matches.length === 1) {
+      return { value: matches[0]!.name, state: { query, index: 0 } };
+    }
+    const common = longestCommonPrefix(matches.map((command) => command.name));
+    if (common.length > input.trim().length) {
+      return { value: common, state: { query, index: -1 } };
+    }
+    const index = direction === "next" ? 0 : matches.length - 1;
+    return { value: matches[index]!.name, state: { query, index } };
+  }
+  if (previous.index < 0) {
+    const index = direction === "next" ? 0 : matches.length - 1;
+    return { value: matches[index]!.name, state: { query, index } };
+  }
+  const offset = direction === "next" ? 1 : -1;
+  const index = (previous.index + offset + matches.length) % matches.length;
+  return { value: matches[index]!.name, state: { query, index } };
+}
+
+function longestCommonPrefix(values: string[]): string {
+  const first = values[0];
+  if (first === undefined) return "";
+  return values.reduce((prefix, value) => {
+    let end = prefix.length;
+    while (end > 0 && !value.startsWith(prefix.slice(0, end))) end -= 1;
+    return prefix.slice(0, end);
+  }, first);
+}
+
 export function cycleSlashCommand(
   input: string,
   direction: "next" | "previous",
@@ -865,7 +1241,7 @@ export function cycleSlashCommand(
 export function sessionFooter(sessionId: string, active: boolean): string {
   return `session ${sessionId} · ${
     active
-      ? "enter send · shift+enter newline · arrows navigate · ↑/↓ history or / commands · ctrl+c quit"
+      ? "enter send · tab complete · shift+enter newline · arrows navigate · ↑/↓ history or / commands · ctrl+c quit"
       : "ctrl+c cancel current prompt"
   }`;
 }

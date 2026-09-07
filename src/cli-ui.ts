@@ -58,12 +58,14 @@ Browser automation built from small, reusable pieces.
 
 ${theme.bold("Usage")}
   ${theme.accent("mosaik")}                     Start an interactive browser session
+  ${theme.accent("mosaik")} --model <model>     Start interactive with a model
   ${theme.accent("mosaik")} <command> [options]
 
 ${theme.bold("Commands")}
   ${theme.accent("init")}      Create a local TypeScript project
   ${theme.accent("run")}       Compose and run a browser task
   ${theme.accent("login")}     Save and verify a browser login
+  ${theme.accent("provider")}  Sign in to OpenAI Codex
   ${theme.accent("config")}    Set project defaults
   ${theme.accent("actions")}   Inspect learned site actions
   ${theme.accent("pull")}      Pull learning from the remote library
@@ -137,6 +139,7 @@ export class TaskReporter {
   readonly #enabled: boolean;
   readonly #stream: WriteStream;
   readonly #theme: CliTheme;
+  #redraw: (() => void) | undefined = undefined;
 
   constructor(options: { enabled?: boolean; stream?: WriteStream } = {}) {
     this.#enabled = options.enabled ?? true;
@@ -144,28 +147,51 @@ export class TaskReporter {
     this.#theme = createTheme(shouldUseColor(this.#stream));
   }
 
-  async task<T>(labels: { active: string; done: string }, run: () => Promise<T>): Promise<T> {
-    if (!this.#enabled) return run();
+  note(message: string): void {
+    if (!this.#enabled) return;
+    const line = `${this.#theme.dim("→")}  ${message}\n`;
+    if (this.#redraw !== undefined && this.#stream.isTTY === true) {
+      this.#stream.write(`\r\u001b[2K${line}`);
+      this.#redraw();
+      return;
+    }
+    this.#stream.write(line);
+  }
+
+  async task<T>(
+    labels: { active: string; done: string },
+    run: (progress: (active: string) => void) => Promise<T>,
+  ): Promise<T> {
+    if (!this.#enabled) return run(() => undefined);
     const startedAt = performance.now();
     const interactive = this.#stream.isTTY === true;
     const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     let frame = 0;
+    let active = labels.active;
     const draw = () => {
       this.#stream.write(
-        `\r${this.#theme.accent(frames[frame % frames.length]!)}  ${labels.active}`,
+        `\r\u001b[2K${this.#theme.accent(frames[frame % frames.length]!)}  ${active}`,
       );
       frame += 1;
     };
+    const progress = (next: string) => {
+      const label = next.trim();
+      if (label.length === 0 || label === active) return;
+      active = label;
+      if (interactive) draw();
+    };
     let timer: NodeJS.Timeout | undefined;
+    this.#redraw = interactive ? draw : undefined;
     if (interactive) {
       draw();
       timer = setInterval(draw, 80);
     } else {
-      this.#stream.write(`→ ${labels.active}\n`);
+      this.#stream.write(`→ ${active}\n`);
     }
     try {
-      const value = await run();
+      const value = await run(progress);
       if (timer !== undefined) clearInterval(timer);
+      this.#redraw = undefined;
       const duration = formatDuration(performance.now() - startedAt);
       if (interactive) this.#stream.write("\r\u001b[2K");
       this.#stream.write(
@@ -174,8 +200,9 @@ export class TaskReporter {
       return value;
     } catch (error) {
       if (timer !== undefined) clearInterval(timer);
+      this.#redraw = undefined;
       if (interactive) this.#stream.write("\r\u001b[2K");
-      this.#stream.write(`${this.#theme.error("×")}  ${labels.active} failed\n`);
+      this.#stream.write(`${this.#theme.error("×")}  ${active} failed\n`);
       throw error;
     }
   }

@@ -4,11 +4,16 @@ import { stripVTControlCharacters } from "node:util";
 import { renderToString } from "ink";
 import { createElement } from "react";
 import {
+  completeSlashCommand,
   cycleInputHistory,
+  cycleModelChoice,
   cycleSlashCommand,
   enterBehavior,
   insertAtCursor,
   isMultilineInput,
+  isModelPickerInput,
+  modelPickerFooter,
+  modelPickerOpenValue,
   moveCursor,
   moveCursorVertically,
   parseInteractiveInput,
@@ -20,12 +25,28 @@ import {
   validateWebUrl,
 } from "../cli-tui.js";
 
+test("start screen lists models when /model is typed", () => {
+  const output = stripVTControlCharacters(
+    renderToString(
+      createElement(StartView, {
+        version: "0.1.0",
+        workingDirectory: "/tmp/mosaik-test",
+        model: "gpt-5.6-luna",
+        value: "/model ",
+      }),
+    ),
+  );
+
+  assert.match(output, /↑\/↓ pick model/);
+});
+
 test("interactive mode starts by asking for a URL", () => {
   const output = stripVTControlCharacters(
     renderToString(
       createElement(StartView, {
         version: "0.1.0",
         workingDirectory: "/tmp/mosaik-test",
+        model: "gpt-5.6-luna",
         value: "",
       }),
     ),
@@ -33,6 +54,7 @@ test("interactive mode starts by asking for a URL", () => {
 
   assert.match(output, /Where should we start\?/);
   assert.match(output, /Mosaik opens the browser immediately/);
+  assert.match(output, /openai-codex · gpt-5\.6-luna/);
   assert.doesNotMatch(output, /What do you want to do/);
 });
 
@@ -63,6 +85,11 @@ test("interactive input recognizes tasks and registered commands", () => {
   assert.deepEqual(parseInteractiveInput("/login"), { kind: "login" });
   assert.deepEqual(parseInteractiveInput("login"), { kind: "login" });
   assert.deepEqual(parseInteractiveInput("/new"), { kind: "new" });
+  assert.deepEqual(parseInteractiveInput("/model"), { kind: "model" });
+  assert.deepEqual(parseInteractiveInput("/model gpt-5.6-luna"), {
+    kind: "model",
+    model: "gpt-5.6-luna",
+  });
   assert.deepEqual(parseInteractiveInput("/login https://example.test"), {
     kind: "error",
     message: "/login does not take arguments",
@@ -73,11 +100,45 @@ test("interactive input recognizes tasks and registered commands", () => {
   });
 });
 
+test("/model picker cycles through available models", () => {
+  assert.equal(isModelPickerInput("/model"), false);
+  assert.equal(isModelPickerInput("/model "), true);
+  assert.equal(isModelPickerInput("/model spark"), true);
+  assert.equal(isModelPickerInput("/login"), false);
+  assert.equal(modelPickerOpenValue("/model"), "/model ");
+  assert.equal(modelPickerOpenValue("/model spark"), undefined);
+  const first = cycleModelChoice("/model ", "next");
+  assert.equal(first?.value, "/model openai/gpt-5.6-luna:nitro");
+  const second = cycleModelChoice(first!.value, "next", first!.state);
+  assert.equal(second?.value, "/model openai-codex/gpt-5.6-luna");
+  const wrapped = cycleModelChoice(second!.value, "previous", second!.state);
+  assert.equal(wrapped?.value, "/model openai/gpt-5.6-luna:nitro");
+  assert.equal(cycleModelChoice("/model", "next"), undefined);
+  assert.equal(
+    modelPickerFooter(),
+    "tab or ↑/↓ pick model · enter use · type to filter · esc clear",
+  );
+});
+
+test("tab completes unique slash commands and cycles when several match", () => {
+  assert.equal(completeSlashCommand("/l")?.value, "/login");
+  assert.equal(completeSlashCommand("/m")?.value, "/model");
+  assert.equal(completeSlashCommand("plain text"), undefined);
+  const first = completeSlashCommand("/");
+  assert.equal(first?.value, "/login");
+  const second = completeSlashCommand(first!.value, "next", first!.state);
+  assert.equal(second?.value, "/model");
+  const previous = completeSlashCommand(second!.value, "previous", second!.state);
+  assert.equal(previous?.value, "/login");
+});
+
 test("arrow keys cycle slash commands using the original prefix", () => {
   const first = cycleSlashCommand("/", "next");
   assert.equal(first?.value, "/login");
   const second = cycleSlashCommand(first!.value, "next", first!.state);
-  assert.equal(second?.value, "/new");
+  assert.equal(second?.value, "/model");
+  const third = cycleSlashCommand(second!.value, "next", second!.state);
+  assert.equal(third?.value, "/new");
   const wrapped = cycleSlashCommand(second!.value, "previous", second!.state);
   assert.equal(wrapped?.value, "/login");
   assert.equal(cycleSlashCommand("/l", "next")?.value, "/login");
@@ -114,6 +175,7 @@ test("input editing inserts, removes, and navigates at the cursor", () => {
 
 test("chat footer includes the current run ID", () => {
   assert.match(sessionFooter("run-123", true), /^session run-123 · enter send/);
+  assert.match(sessionFooter("run-123", true), /tab complete/);
   assert.match(sessionFooter("run-123", true), /arrows navigate/);
   assert.match(sessionFooter("run-123", true), /↑\/↓ history or \/ commands/);
   assert.match(sessionFooter("run-123", false), /^session run-123 · ctrl\+c cancel/);

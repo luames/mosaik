@@ -7,6 +7,7 @@ import {
   renderCliError,
   renderDoctorReport,
   renderRootHelp,
+  TaskReporter,
   type DoctorReport,
 } from "../cli-ui.js";
 
@@ -68,6 +69,27 @@ test("CLI errors include command-specific help and durations stay compact", () =
   assert.equal(formatDuration(412), "412ms");
   assert.equal(formatDuration(1_250), "1.3s");
   assert.equal(formatDuration(14_800), "15s");
+});
+
+test("task reporter updates the active label from progress", async () => {
+  const chunks: string[] = [];
+  const stream = {
+    isTTY: false,
+    write(chunk: string) {
+      chunks.push(chunk);
+      return true;
+    },
+  } as unknown as NodeJS.WriteStream;
+  const reporter = new TaskReporter({ stream });
+  await reporter.task({ active: "Planning task", done: "Finished" }, async (progress) => {
+    reporter.note("Calling inspectNavigation");
+    progress("prepareComposition");
+  });
+  assert.equal(
+    chunks.some((chunk) => chunk.includes("Calling inspectNavigation")),
+    true,
+  );
+  assert.match(chunks.at(-1) ?? "", /Finished/);
 });
 
 test("execution values render for ordinary objects and keep collection summaries compact", () => {

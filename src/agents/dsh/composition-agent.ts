@@ -36,11 +36,14 @@ import {
   loadDshEvents,
   loadProjectEnv,
   runDshChild,
+  sessionTurnEnded,
   type DshSessionEvent,
   type DshReasoning,
 } from "./session.js";
 import { dshResourcePath, resolveDshCommand } from "./paths.js";
 import { DISCOVERY_PROFILE } from "./discovery-profile.js";
+import { DEFAULT_LLM_MODEL, patchDshProfile } from "./llm-route.js";
+import { assertLlmCredentials } from "../../provider/openai-codex.js";
 
 import {
   readReusableAutomation,
@@ -133,8 +136,8 @@ export class DshCapabilityCompositionAgent implements CapabilityCompositionAgent
           result,
           join(root, `outcome-${attempt}`),
           options,
-          this.options.model ?? "openai/gpt-5.6-luna:nitro",
-          this.options.reasoning ?? "low",
+          this.options.model ?? DEFAULT_LLM_MODEL,
+          this.options.reasoning ?? "high",
         ),
     ).then(async (result) => {
       if (
@@ -177,6 +180,7 @@ export class DshCapabilityCompositionAgent implements CapabilityCompositionAgent
     }
     throwIfAborted(options.signal);
     await loadProjectEnv(this.projectRoot);
+    await assertLlmCredentials(this.options.model ?? DEFAULT_LLM_MODEL);
     options.onProgress?.({ kind: "status", message: "Inspecting learned actions" });
     const siteId = normalizeSiteId(request.siteId);
     const before = await this.store.siteActions.list(siteId);
@@ -190,19 +194,16 @@ export class DshCapabilityCompositionAgent implements CapabilityCompositionAgent
     if (automation) {
       options.onProgress?.({ kind: "status", message: "Reusing validated automation" });
     } else {
-      const model = this.options.model ?? "openai/gpt-5.6-luna:nitro";
-      const reasoning = this.options.reasoning ?? "low";
-      const discoveryReasoning = this.options.discoveryReasoning ?? "medium";
-      const template = DISCOVERY_PROFILE;
+      const model = this.options.model ?? DEFAULT_LLM_MODEL;
+      const reasoning = this.options.reasoning ?? "high";
+      const discoveryReasoning = this.options.discoveryReasoning ?? "high";
       const plugin = dshResourcePath("composition-tools.js");
-      const profile = template
-        .replace("__DSH_DISCOVERY_PLUGIN__", JSON.stringify(plugin))
-        .replace(/model: openai\/gpt-5\.6-luna:nitro/g, `model: ${model}`)
-        .replace("        reasoning: high", `        reasoning: ${reasoning}`)
-        .replace(
-          /      You discover a browser automation[\s\S]*?      After finishDiscovery returns discovered, STOP\./,
-          PERSONA,
-        );
+      const profile = patchDshProfile(DISCOVERY_PROFILE, {
+        model,
+        reasoning,
+        plugin,
+        persona: PERSONA,
+      });
       const profilePath = join(runDirectory, "profile.cordis.yml");
       await writeFile(profilePath, profile, "utf8");
       const dsh = resolveDshCommand();
@@ -500,8 +501,10 @@ async function hasCompositionTerminal(
   runDirectory: string,
   request: CapabilityCompositionRequest,
 ): Promise<boolean> {
-  const analyzed = analyzeAgentEvents(await loadDshEvents(runDirectory), 0);
+  const events = await loadDshEvents(runDirectory);
+  const analyzed = analyzeAgentEvents(events, 0);
   if (budgetExceeded(request, analyzed.metrics) !== undefined) return true;
+  if (sessionTurnEnded(events)) return true;
   const values = analyzed.terminalValues;
   for (const value of values) {
     if (asRefusal(value) !== undefined) return true;

@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
+import { resolveLlmRoute } from "./agents/dsh/llm-route.js";
 import { defaultPackageName } from "./init.js";
 
 export interface RunCliOptions {
@@ -22,6 +23,48 @@ export interface RunCliOptions {
 
 export type RunCliParseResult = { help: true } | { help: false; options: RunCliOptions };
 
+export interface InteractiveCliOptions {
+  model?: string;
+}
+
+export type InteractiveCliParseResult =
+  | { help: true }
+  | { help: false; options: InteractiveCliOptions };
+
+export const INTERACTIVE_CLI_HELP = `Start an interactive browser session.
+
+Usage:
+  mosaik [options]
+
+Options:
+      --model <model>           Composition and discovery model.
+                                Use gpt-5.6-luna after mosaik provider login.
+                                Codex models use Fast mode by default.
+  -h, --help                    Show this help
+`;
+
+export function parseInteractiveCliArgs(args: string[]): InteractiveCliParseResult {
+  const parsed = parseArgs({
+    args,
+    allowPositionals: true,
+    strict: true,
+    options: {
+      model: { type: "string" },
+      help: { type: "boolean", short: "h", default: false },
+    },
+  });
+  if (parsed.values.help) return { help: true };
+  if (parsed.positionals.length > 0) {
+    throw new Error(`Unknown argument "${parsed.positionals[0]}"`);
+  }
+  if (parsed.values.model !== undefined) {
+    const model = parsed.values.model.trim();
+    resolveLlmRoute(model);
+    return { help: false, options: { model } };
+  }
+  return { help: false, options: {} };
+}
+
 export const RUN_CLI_HELP = `Compose a task from learned actions, discover one missing action when needed,
 and run the resulting browser automation.
 
@@ -37,7 +80,9 @@ Options:
       --input-json <object>     Input values as a JSON object
       --automation-id <id>      Stable ID for the generated automation
       --data-dir <directory>    Mosaik data directory, default .mosaik
-      --model <model>           Composition and discovery model
+      --model <model>           Composition and discovery model.
+                                Use gpt-5.6-luna after mosaik provider login.
+                                Codex models use Fast mode by default.
       --browser <provider>      Browser provider: local or kernel
       --kernel-profile <name>   Kernel profile name to load and save
       --kernel-auth-connection <id>
@@ -161,7 +206,8 @@ export function parseRunCliArgs(
 }
 
 export type ConfigCliOptions =
-  | { dataDirectory: string; setting: "browser"; value: "local" | "kernel" }
+  | { dataDirectory: string; setting: "browser"; browser: "local" | "kernel" }
+  | { dataDirectory: string; setting: "model"; model: string }
   | { dataDirectory: string; setting: "humanize"; value: boolean };
 
 export type ConfigCliParseResult = { help: true } | { help: false; options: ConfigCliOptions };
@@ -170,6 +216,7 @@ export const CONFIG_CLI_HELP = `Set project-local Mosaik defaults.
 
 Usage:
   mosaik config set browser <local|kernel> [options]
+  mosaik config set model <model> [options]
   mosaik config set humanize <true|false> [options]
 
 Options:
@@ -183,12 +230,10 @@ export function parseConfigCliArgs(
 ): ConfigCliParseResult {
   const [subcommand, setting, value, ...rest] = args;
   if (subcommand === "--help" || subcommand === "-h") return { help: true };
-  if (
-    subcommand !== "set" ||
-    (setting !== "browser" && setting !== "humanize") ||
-    value === undefined
-  ) {
-    throw new Error("Usage: mosaik config set <browser|humanize> <value>");
+  if (subcommand !== "set" || setting === undefined || value === undefined) {
+    throw new Error(
+      "Usage: mosaik config set browser <local|kernel> | model <model> | humanize <true|false>",
+    );
   }
   const parsed = parseArgs({
     args: rest,
@@ -200,16 +245,29 @@ export function parseConfigCliArgs(
   });
   if (parsed.values.help) return { help: true };
   const dataDirectory = resolve(workingDirectory, parsed.values["data-dir"] ?? ".mosaik");
+  if (setting === "browser") {
+    if (value !== "local" && value !== "kernel") {
+      throw new Error('browser must be "local" or "kernel"');
+    }
+    return { help: false, options: { setting: "browser", browser: value, dataDirectory } };
+  }
+  if (setting === "model") {
+    const model = value.trim();
+    resolveLlmRoute(model);
+    return { help: false, options: { setting: "model", model, dataDirectory } };
+  }
   if (setting === "humanize") {
     if (value !== "true" && value !== "false") {
       throw new Error("humanize must be true or false");
     }
-    return { help: false, options: { setting, value: value === "true", dataDirectory } };
+    return {
+      help: false,
+      options: { setting: "humanize", value: value === "true", dataDirectory },
+    };
   }
-  if (value !== "local" && value !== "kernel") {
-    throw new Error('browser must be "local" or "kernel"');
-  }
-  return { help: false, options: { setting, value, dataDirectory } };
+  throw new Error(
+    "Usage: mosaik config set browser <local|kernel> | model <model> | humanize <true|false>",
+  );
 }
 
 export interface ActionsCliOptions {
@@ -518,4 +576,47 @@ function parseInputValue(value: string): unknown {
   } catch {
     return value;
   }
+}
+
+export interface ProviderCliOptions {
+  action: "login" | "status" | "logout";
+}
+
+export type ProviderCliParseResult = { help: true } | { help: false; options: ProviderCliOptions };
+
+export const PROVIDER_CLI_HELP = `Sign in to a local LLM provider.
+
+Usage:
+  mosaik provider login
+  mosaik provider status
+  mosaik provider logout
+
+Options:
+  -h, --help                    Show this help
+
+Login opens ChatGPT OAuth, stores a grant in $DSH_HOME/.credentials.yaml
+(~/.dsh), and sets this project's default model to Codex Luna.
+Logout removes only that grant. Other DSH records stay put.
+This is Mosaik's own grant. It does not use ~/.codex/auth.json.
+Kernel deployments still use OPENROUTER_API_KEY.
+`;
+
+export function parseProviderCliArgs(args: string[]): ProviderCliParseResult {
+  const [action, ...rest] = args;
+  if (action === undefined || action === "--help" || action === "-h") return { help: true };
+  if (action !== "login" && action !== "status" && action !== "logout") {
+    throw new Error("Usage: mosaik provider login|status|logout");
+  }
+  const parsed = parseArgs({
+    args: rest,
+    strict: true,
+    options: {
+      help: { type: "boolean", short: "h", default: false },
+    },
+  });
+  if (parsed.values.help) return { help: true };
+  if (parsed.positionals.length > 0) {
+    throw new Error("mosaik provider does not take extra arguments");
+  }
+  return { help: false, options: { action } };
 }

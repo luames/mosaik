@@ -5,7 +5,9 @@ import {
   parseActionsCliArgs,
   parseConfigCliArgs,
   parseDoctorCliArgs,
+  parseInteractiveCliArgs,
   parseKernelCliArgs,
+  parseProviderCliArgs,
   parsePullCliArgs,
   parseRunCliArgs,
 } from "../cli-options.js";
@@ -39,6 +41,41 @@ test("run CLI parses typed inputs and defaults the site to the URL host", () => 
     kernelTimeoutSeconds: 300,
     json: false,
   });
+});
+
+test("interactive CLI accepts a model flag", () => {
+  assert.deepEqual(parseInteractiveCliArgs([]), { help: false, options: {} });
+  assert.deepEqual(parseInteractiveCliArgs(["--model", "gpt-5.6-luna"]), {
+    help: false,
+    options: { model: "gpt-5.6-luna" },
+  });
+  assert.throws(
+    () => parseInteractiveCliArgs(["--model", "openai-codex/gpt-5.3-codex-spark"]),
+    /only gpt-5\.6-luna/,
+  );
+  assert.deepEqual(parseInteractiveCliArgs(["--help"]), { help: true });
+  assert.throws(() => parseInteractiveCliArgs(["--model", ""]), /model id is required/);
+});
+
+test("config CLI sets browser and model defaults", () => {
+  assert.deepEqual(parseConfigCliArgs(["set", "browser", "kernel"], "/project"), {
+    help: false,
+    options: {
+      setting: "browser",
+      browser: "kernel",
+      dataDirectory: resolve("/project/.mosaik"),
+    },
+  });
+  assert.deepEqual(parseConfigCliArgs(["set", "model", "luna"], "/project"), {
+    help: false,
+    options: {
+      setting: "model",
+      model: "luna",
+      dataDirectory: resolve("/project/.mosaik"),
+    },
+  });
+  assert.deepEqual(parseConfigCliArgs(["--help"]), { help: true });
+  assert.throws(() => parseConfigCliArgs(["set", "browser"]), /Usage/);
 });
 
 test("run CLI accepts explicit IDs, model, and data directory", () => {
@@ -259,4 +296,22 @@ test("pull CLI parses backend-agnostic synchronization options", () => {
   }
   assert.deepEqual(parsePullCliArgs(["--help"]), { help: true });
   assert.throws(() => parsePullCliArgs(["--namespace", "invalid namespace"]), /namespace/);
+});
+
+test("provider CLI parses login, status, and logout", () => {
+  assert.deepEqual(parseProviderCliArgs(["--help"]), { help: true });
+  assert.deepEqual(parseProviderCliArgs(["login"]), {
+    help: false,
+    options: { action: "login" },
+  });
+  assert.deepEqual(parseProviderCliArgs(["status"]), {
+    help: false,
+    options: { action: "status" },
+  });
+  assert.deepEqual(parseProviderCliArgs(["logout"]), {
+    help: false,
+    options: { action: "logout" },
+  });
+  assert.throws(() => parseProviderCliArgs(["revoke"]), /login\|status\|logout/);
+  assert.throws(() => parseProviderCliArgs(["login", "--from-codex"]), /Unknown option/);
 });

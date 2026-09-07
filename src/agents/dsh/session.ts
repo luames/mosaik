@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { readdir, readFile } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
+import { withCodexFastNodeOptions } from "../../provider/openai-codex-fast.js";
 import type { AgentRunMetrics, TrajectoryEntry } from "../metrics.js";
 import { billedInputTokens, parseDshUsage } from "../metrics.js";
 
@@ -92,9 +93,10 @@ export function runDshChild(
       return;
     }
     const ownsProcessGroup = process.platform !== "win32" && env.MOSAIK_CHILD_PROCESS_GROUP !== "1";
+    const childEnv = withCodexFastNodeOptions(env);
     const child = spawn(executable, args, {
       cwd: process.cwd(),
-      env: ownsProcessGroup ? { ...env, MOSAIK_CHILD_PROCESS_GROUP: "1" } : env,
+      env: ownsProcessGroup ? { ...childEnv, MOSAIK_CHILD_PROCESS_GROUP: "1" } : childEnv,
       stdio: ["ignore", "pipe", "pipe"],
       detached: ownsProcessGroup,
     });
@@ -136,6 +138,12 @@ export function runDshChild(
           for (const event of batch.events) control.onEvent(event);
         }
         if (shouldStop !== undefined && (await shouldStop())) terminate(false);
+        else if (
+          control.eventRoot !== undefined &&
+          sessionTurnEnded(await loadDshEvents(control.eventRoot))
+        ) {
+          terminate(false);
+        }
       } catch {
         // Event files may be between writes. The next poll retries them.
       } finally {
@@ -172,6 +180,10 @@ function abortError(reason: unknown): Error {
   const error = new Error(typeof reason === "string" ? reason : "Run cancelled");
   error.name = "AbortError";
   return error;
+}
+
+export function sessionTurnEnded(events: readonly DshSessionEvent[]): boolean {
+  return events.some((event) => event.type === "turn/end" && event.nestedDiscovery !== true);
 }
 
 export async function loadDshEvents(root: string): Promise<DshSessionEvent[]> {
