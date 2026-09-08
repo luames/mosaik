@@ -540,15 +540,20 @@ test("humanized click timeout covers movement and click cadence", async () => {
     await page.setContent(
       '<button style="position:absolute;left:700px;top:420px;width:140px;height:60px">Continue</button>',
     );
-    enablePageHumanization(page, { idle: false });
-    const started = Date.now();
+    const random = vi.spyOn(Math, "random").mockReturnValueOnce(0).mockReturnValueOnce(0);
+    try {
+      enablePageHumanization(page, { idle: false });
+      const started = Date.now();
 
-    await assert.rejects(
-      humanizedClick(page, page.getByRole("button", { name: "Continue" }), { timeout: 500 }),
-      /timeout|timed out/i,
-    );
+      await assert.rejects(
+        humanizedClick(page, page.getByRole("button", { name: "Continue" }), { timeout: 500 }),
+        /timeout|timed out/i,
+      );
 
-    assert.ok(Date.now() - started < 900, "click exceeded its single timeout deadline");
+      assert.ok(Date.now() - started < 900, "click exceeded its single timeout deadline");
+    } finally {
+      random.mockRestore();
+    }
   });
 });
 

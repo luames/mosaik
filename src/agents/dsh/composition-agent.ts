@@ -180,7 +180,6 @@ export class DshCapabilityCompositionAgent implements CapabilityCompositionAgent
     }
     throwIfAborted(options.signal);
     await loadProjectEnv(this.projectRoot);
-    await assertLlmCredentials(this.options.model ?? DEFAULT_LLM_MODEL);
     options.onProgress?.({ kind: "status", message: "Inspecting learned actions" });
     const siteId = normalizeSiteId(request.siteId);
     const before = await this.store.siteActions.list(siteId);
@@ -194,6 +193,7 @@ export class DshCapabilityCompositionAgent implements CapabilityCompositionAgent
     if (automation) {
       options.onProgress?.({ kind: "status", message: "Reusing validated automation" });
     } else {
+      await assertLlmCredentials(this.options.model ?? DEFAULT_LLM_MODEL);
       const model = this.options.model ?? DEFAULT_LLM_MODEL;
       const reasoning = this.options.reasoning ?? "high";
       const discoveryReasoning = this.options.discoveryReasoning ?? "high";

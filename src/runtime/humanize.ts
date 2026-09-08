@@ -671,10 +671,38 @@ export async function humanizedSelectOption(
   for (let index = 0; index < optionIndex; index += 1)
     await pressSelectKey(page, intendedTarget, "ArrowDown", deadline);
   await pressSelectKey(page, intendedTarget, "Enter", deadline);
+  if ((await deadlineRace(intendedTarget.inputValue(), deadline)) === value) return [value];
+  if (!(await commitSelectValue(intendedTarget, value, deadline))) {
+    throw new Error("Select option value could not be selected");
+  }
   if ((await deadlineRace(intendedTarget.inputValue(), deadline)) !== value) {
     throw new Error("Select option value could not be selected");
   }
   return [value];
+}
+
+async function commitSelectValue(
+  target: ElementHandle<HTMLElement | SVGElement>,
+  value: string,
+  deadline: InteractionDeadline,
+): Promise<boolean> {
+  return deadlineRace(
+    target.evaluate((element, desired) => {
+      const select = element as HTMLSelectElement;
+      const enabled = [...select.options].filter(
+        (option) =>
+          !option.disabled && !(option.parentElement as HTMLOptGroupElement | null)?.disabled,
+      );
+      const option = enabled.find((item) => item.value === desired);
+      if (option === undefined) return false;
+      option.selected = true;
+      select.value = desired;
+      select.dispatchEvent(new Event("input", { bubbles: true }));
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+      return select.value === desired;
+    }, value),
+    deadline,
+  );
 }
 
 async function pressSelectKey(
