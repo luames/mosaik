@@ -3,12 +3,16 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
+import { DEFAULT_LLM_MODEL } from "../agents/dsh/llm-route.js";
 import {
   findKernelAuthConnection,
   loadMosaikConfig,
   loadInteractiveCliHistory,
   rememberInteractiveHistory,
+  resolveHumanization,
   saveDefaultBrowser,
+  saveDefaultModel,
+  saveHumanizationDefault,
   saveKernelAuthConnection,
   saveInteractiveCliHistory,
   saveOpenRouterKey,
@@ -96,8 +100,17 @@ test("project config saves defaults and longest matching Kernel domains atomical
       profileName: "exact",
     });
     await saveDefaultBrowser(dataDirectory, "kernel");
+    await saveDefaultModel(dataDirectory, "gpt-5.6-luna");
     const config = await loadMosaikConfig(dataDirectory);
     assert.equal(config.browser, "kernel");
+    assert.equal(config.provider, "openai-codex");
+    assert.equal(config.model, "gpt-5.6-luna");
+    const stored = JSON.parse(await readFile(join(dataDirectory, "config.json"), "utf8")) as {
+      provider?: string;
+      model?: string;
+    };
+    assert.equal(stored.provider, "openai-codex");
+    assert.equal(stored.model, "gpt-5.6-luna");
     assert.equal(
       findKernelAuthConnection(config, "https://app.example.com/task")?.connectionId,
       "conn_exact",
@@ -111,6 +124,88 @@ test("project config saves defaults and longest matching Kernel domains atomical
       assert.equal((await stat(dataDirectory)).mode & 0o777, 0o700);
       assert.equal((await stat(join(dataDirectory, "config.json"))).mode & 0o777, 0o600);
     }
+    await saveDefaultBrowser(dataDirectory, "camoufox");
+    assert.equal((await loadMosaikConfig(dataDirectory)).browser, "camoufox");
+    await writeFile(
+      join(dataDirectory, "config.json"),
+      JSON.stringify({
+        version: 1,
+        browser: "camoufox",
+        camoufox: { os: "windows", locale: "en-US", humanize: true },
+      }),
+      "utf8",
+    );
+    assert.deepEqual(await loadMosaikConfig(dataDirectory), {
+      version: 1,
+      browser: "camoufox",
+      camoufox: { os: "windows", locale: "en-US", humanize: true },
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Codex Luna replaces an OpenRouter project default", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mosaik-config-"));
+  const dataDirectory = join(directory, ".mosaik");
+  try {
+    await saveDefaultModel(dataDirectory, DEFAULT_LLM_MODEL);
+    assert.deepEqual(await loadMosaikConfig(dataDirectory), {
+      version: 1,
+      provider: "openrouter",
+      model: DEFAULT_LLM_MODEL,
+    });
+    await saveDefaultModel(dataDirectory, "gpt-5.6-luna");
+    assert.deepEqual(await loadMosaikConfig(dataDirectory), {
+      version: 1,
+      provider: "openai-codex",
+      model: "gpt-5.6-luna",
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("project config persists the opt-in humanization default", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mosaik-config-"));
+  const dataDirectory = join(directory, ".mosaik");
+  try {
+    await saveHumanizationDefault(dataDirectory, true);
+    assert.equal((await loadMosaikConfig(dataDirectory)).humanize, true);
+    await saveHumanizationDefault(dataDirectory, false);
+    assert.equal((await loadMosaikConfig(dataDirectory)).humanize, false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("explicit humanization flags override the project default", () => {
+  assert.equal(resolveHumanization(undefined, { version: 1 }), false);
+  assert.equal(resolveHumanization(undefined, { version: 1, humanize: true }), true);
+  assert.equal(resolveHumanization(false, { version: 1, humanize: true }), false);
+  assert.equal(resolveHumanization(true, { version: 1, humanize: false }), true);
+});
+
+test("project config keeps a model-only file and requires a model with provider", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mosaik-config-"));
+  const dataDirectory = join(directory, ".mosaik");
+  try {
+    await mkdir(dataDirectory, { recursive: true });
+    await writeFile(
+      join(dataDirectory, "config.json"),
+      `${JSON.stringify({ version: 1, model: "gpt-5.6-luna" }, null, 2)}\n`,
+      "utf8",
+    );
+    assert.deepEqual(await loadMosaikConfig(dataDirectory), {
+      version: 1,
+      model: "gpt-5.6-luna",
+    });
+    await writeFile(
+      join(dataDirectory, "config.json"),
+      `${JSON.stringify({ version: 1, provider: "openai-codex" }, null, 2)}\n`,
+      "utf8",
+    );
+    await assert.rejects(() => loadMosaikConfig(dataDirectory), /model is required/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -123,6 +218,12 @@ test("malformed project config names its file", async () => {
     await mkdir(dataDirectory, { recursive: true });
     await writeFile(join(dataDirectory, "config.json"), '{"version":2}', "utf8");
     await assert.rejects(() => loadMosaikConfig(dataDirectory), /config\.json.*version/);
+    await writeFile(
+      join(dataDirectory, "config.json"),
+      '{"version":1,"browser":"camoufox","camoufox":{"os":"android"}}',
+      "utf8",
+    );
+    await assert.rejects(() => loadMosaikConfig(dataDirectory), /camoufox\.os/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

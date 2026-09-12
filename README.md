@@ -2,43 +2,43 @@
 
 Browser automation built from small, reusable pieces.
 
-Reading thousands of records or checking a complete user journey takes consistent
-execution. We want to run the same steps across every page and repeat them next
-week. Mosaik saves those steps as code so the workflow stays the same between runs.
+When you're reading thousands of records, you need to apply the same rules to
+each one. When you're checking a complete user journey, you need to repeat it
+after the next release. Mosaik saves the steps as code so the workflow stays
+the same between runs.
 
-Mosaik uses an agent to figure out how a site works, saves reusable actions as
-TypeScript, and composes them into automations. Playwright executes the browser
-steps deterministically. Loops, branching, and data transformations run as code,
-so each iteration doesn't need another model decision. Execution time and
-action-call budgets still bound each run.
+An agent figures out how a site works, saves reusable actions as TypeScript, and
+composes them into automations. Playwright executes the browser steps
+deterministically. Loops, branching, and data transformations run as code without
+a model decision for each iteration. Each run has limits on execution time and
+action calls.
 
-Those actions stay around for the next task. Mosaik reuses what it knows about
-the site and learns what's missing. If an eligible locator breaks, an agent can
-step in to repair it.
+Mosaik reuses saved actions for later tasks on the same site and learns any
+missing actions. If an eligible locator breaks, an agent can repair it.
 
-Dependable runs at that scale are what we're working toward. This is still alpha
+We're still working toward dependable runs at that scale. Mosaik is alpha
 software, and we're changing things freely. Expect bugs and breaking changes.
 
-Some tasks we want this to be good at:
+We're building it for tasks like these:
 
 - Gather research data from thousands of records, extracting the same fields
-  with the same rules all the way through. Changing the interpretation halfway
-  through makes the dataset hard to trust.
+  with consistent rules. The dataset is hard to trust if the interpretation
+  changes halfway through.
 - Check a whole website for missing images or incorrect prices. Apply the same
   checks to page 8,000 as page 1, and account for pages that couldn't be checked.
-- Verify a complete user journey. Can someone find a course, select a date, and
-  reach registration? Run that workflow again after a release and check that
-  every step still works. A working homepage doesn't tell you much about the rest.
+- Verify that someone can find a course, select a date, and reach registration,
+  then repeat the workflow after a release. Checking the homepage alone won't
+  catch failures in the rest of the journey.
 
 ## Try it
 
-The default model is `openai/gpt-5.6-luna:nitro` through OpenRouter, used for
-composition, action discovery, and outcome review. This is the model we've
-tested with. You can choose another with `mosaik run --model <model>`, but expect
-some breakage when switching models. Login checks default to the same model and
-can be overridden separately with `MOSAIK_AUTH_MODEL`.
+Mosaik currently supports GPT-5.6 Luna through OpenRouter or your Codex
+subscription.
 
-You'll need Node 22.18 or newer, pnpm, and an OpenRouter API key.
+Pick the provider with `mosaik run --model …` or `/model` in the interactive CLI.
+
+You'll need Node 22.18 or newer, pnpm, and either an OpenRouter API key or a
+Codex sign-in.
 
 Clone this repo and install the CLI:
 
@@ -52,8 +52,8 @@ mosaik setup
 mosaik doctor
 ```
 
-`setup` installs Chromium. `doctor` checks the installation and tells you what
-needs fixing, including a missing API key.
+`setup` installs Chromium and fetches Camoufox. `doctor` checks the installation
+and tells you what needs fixing, including missing provider credentials.
 
 Create a directory for your automations. `mosaik init` makes a TypeScript project
 linked to your Mosaik checkout:
@@ -63,12 +63,14 @@ mkdir my-automations
 cd my-automations
 mosaik init
 export OPENROUTER_API_KEY=your-key
+# or: mosaik provider login
 mosaik
 ```
 
-You can also put the key in this directory's `.env` file.
+You can also put the OpenRouter key in this directory's `.env` file. Codex
+stores its grant in `~/.dsh` after `mosaik provider login`.
 
-You're now in the interactive CLI. When it asks for a URL, enter:
+The interactive CLI will ask for a URL. Enter:
 
 ```text
 https://books.toscrape.com/
@@ -78,6 +80,7 @@ Once the browser opens, give it this task:
 
 ```text
 download the first 100 book covers
+detail page separately.
 ```
 
 Downloaded covers go into `.mosaik/runs/<run-id>/output/`. The actions and automation
@@ -89,8 +92,8 @@ cancels the current prompt without closing the browser.
 
 ## What you get to keep
 
-The useful part is what remains after a run. Learned actions and composed
-automations live in your project as editable TypeScript:
+Learned actions and composed automations live in your project as editable
+TypeScript:
 
 ```text
 sites/<site>/actions/<actionName>.ts
@@ -113,7 +116,28 @@ try {
 }
 ```
 
-That example assumes you've already generated `searchProducts` for your site.
+Set `humanize: true` to use curved `ghost-cursor` mouse paths, paced scrolling,
+variable typing, and occasional cursor movement during browser waits in place
+of direct Playwright interactions. The generated automation stays unchanged.
+This is Mosaik runtime humanization, not Camoufox-native cursor motion
+(`camoufox.humanize`):
+
+```ts
+const mosaik = await createMosaik({ headless: false, humanize: true });
+```
+
+For the CLI, pass `--humanize` for one run or save it as the project default:
+
+```sh
+mosaik config set humanize true
+mosaik run "Search for ceramic mugs" --url https://example.com
+```
+
+`--no-humanize` overrides the project default. Humanization happens during browser
+execution, so it adds no composition or discovery steps and leaves saved action
+and automation source unchanged.
+
+The application example assumes you've already generated `searchProducts` for your site.
 Inputs and return values keep their inferred TypeScript types. By default, a
 saved automation runs without model calls. To let an agent repair eligible failures,
 pass your repair agent when creating the instance:
@@ -127,9 +151,9 @@ const mosaik = await createMosaik({
 
 `repairAgent` implements Mosaik's `RepairAgent` interface. Set `repair: false`
 to disable repair explicitly. Successful repairs stay in memory for later calls
-on this instance; they don't rewrite your source files.
+on this instance. They don't rewrite your source files.
 
-Mosaik keeps metadata, browser profiles, and run traces in `.mosaik/`. Files a
+Mosaik keeps metadata, browser profiles, and run traces in `.mosaik/`. Files an
 automation writes or downloads go into the run's `output/` directory. To see what
 it's learned so far:
 
@@ -137,20 +161,20 @@ it's learned so far:
 mosaik actions list
 ```
 
-## A bit more about how it works
+## How it works
 
-For a new task, the composition agent inspects the site's saved actions and
-works out which ones it can reuse. Discovery fills in the gaps. Mosaik then
-validates the TypeScript automation and runs it through Playwright, with limits on
-execution time and action calls.
+For a new task, the composition agent checks the site's saved actions to see
+which ones it can reuse. If an action is missing, an agent discovers it. Mosaik
+then validates the TypeScript automation and runs it through Playwright, with
+limits on execution time and action calls.
 
-A automation finishing without an error doesn't necessarily mean it did the job.
-A separate model step reviews the results against the original request. It can
-report missing evidence, and runs using existing actions can make bounded
-recovery attempts.
+An automation can finish without an error and still leave the task incomplete.
+A separate model step checks the results against the original request and can
+report missing evidence. Runs using existing actions can attempt recovery within
+set limits.
 
-Some clicks do more than move around a page. "Place order" spends money; "Send"
-contacts another person. Mosaik calls these `external-side-effect` steps, and
+Clicking "Place order" spends money; clicking "Send" contacts another person.
+Mosaik calls these `external-side-effect` steps, and
 action authors mark them explicitly. Normal execution can run them, but repair
 won't automatically retry them or continue through one while validating a fix.
 Outcome recovery also won't replay a task that already attempted one. Buying
@@ -158,7 +182,7 @@ something twice because a locator changed would be a pretty bad repair.
 
 Reuse is per site. An action learned on one shop doesn't automatically work on
 another, and a changed page can still break things. Repair currently handles
-eligible locator replacements. There's plenty left to figure out here.
+eligible locator replacements. It doesn't yet handle other kinds of failure.
 
 ## Login and remote browsers
 
@@ -171,12 +195,20 @@ mosaik login https://example.com/login --pause
 Mosaik supports multi-page username, password, and one-time-code forms. Later
 runs reuse the site's browser profile and saved login flow.
 
-One detail to know before using this with an account: the local CLI saves
-usernames and passwords as unencrypted JSON inside `.mosaik/browser-profiles/`.
-It doesn't save one-time codes. Treat that directory like a password and keep
-it out of git and shared folders. Credentials go through a trusted prompt,
-not through task inputs. The [authentication reference](docs/reference.md#authentication)
+The local CLI saves usernames and passwords as unencrypted JSON inside
+`.mosaik/browser-profiles/`. It doesn't save one-time codes. Treat that directory
+like a password and keep it out of git and shared folders. Credentials go through
+a trusted prompt, not through task inputs. The [authentication reference](docs/reference.md#authentication)
 explains the flow and its limits.
+
+Mosaik can also use [Camoufox](https://camoufox.com/) instead of local
+Chromium. Set `--browser camoufox` or `mosaik config set browser camoufox`.
+Mosaik owns the fingerprint options and maps them onto camoufox-js.
+`--humanize` still uses mosaik's `ghost-cursor` path; optional
+`camoufox.humanize` is a separate Camoufox-native knob and stays off by
+default. Camoufox profiles live under `.mosaik/camoufox-profiles/`,
+separate from Chromium. See the
+[Camoufox guide](docs/reference.md#camoufox-browsers).
 
 Mosaik can also use Kernel browsers. Set `KERNEL_API_KEY` and add
 `--browser kernel` to a run. Kernel login uses its hosted Managed Auth flow.
@@ -197,9 +229,9 @@ container isolation. See [code execution trust](docs/reference.md#code-execution
 
 ## Contributing
 
-Contributions are welcome. Try Mosaik on a site you care about and tell us where
-it breaks, open an issue with an idea, or send a PR. Bug fixes and clearer docs
-help a lot. You don't need to know the whole codebase to get involved.
+Try Mosaik on a site you care about and tell us where it breaks. Ideas, bug fixes,
+and clearer docs are welcome, whether you open an issue or send a PR. You don't
+need to understand the whole codebase to contribute.
 
 Join us on [Discord](https://discord.gg/QmspQUZ3Ec) to ask questions, share what
 you're building, or talk through a contribution.

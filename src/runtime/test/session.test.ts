@@ -11,6 +11,7 @@ import {
   sharedContextSession,
 } from "../session.js";
 import { startFixtureServer } from "../fixtures.js";
+import { isPageHumanized } from "../humanize.js";
 
 test("default local browser sessions discard state between tasks", async () => {
   const fixture = await startFixtureServer({
@@ -32,6 +33,23 @@ test("default local browser sessions discard state between tasks", async () => {
   }
 });
 
+test("default local browser sessions keep one window while a task runs", async () => {
+  const session = await openBrowserSession({ headless: true });
+  try {
+    await session.withPage(async (page) => {
+      const browser = page.context().browser();
+      assert.ok(browser);
+      const openPages = browser
+        .contexts()
+        .flatMap((context) => context.pages().filter((candidate) => !candidate.isClosed()));
+      assert.equal(openPages.length, 1);
+      assert.equal(openPages[0], page);
+    });
+  } finally {
+    await session.close();
+  }
+});
+
 test("interactive browser sessions open immediately and keep the same page", async () => {
   const fixture = await startFixtureServer({
     "/": { html: "<!doctype html><title>Interactive session</title><main>start</main>" },
@@ -45,11 +63,56 @@ test("interactive browser sessions open immediately and keep the same page", asy
   try {
     assert.equal(session.currentUrl(), fixture.url);
     await session.withPage(async (page) => {
+      assert.equal(
+        page
+          .context()
+          .pages()
+          .filter((candidate) => !candidate.isClosed()).length,
+        1,
+      );
       await page.locator("main").evaluate((element) => (element.textContent = "changed"));
     });
     await session.withPage(async (page) => {
       assert.equal(await page.locator("main").textContent(), "changed");
       assert.equal(page.url(), fixture.url);
+    });
+  } finally {
+    await session.close();
+    await fixture.close();
+    await rm(profileDirectory, { recursive: true, force: true });
+  }
+});
+
+test("interactive browser sessions drop leftover profile windows", async () => {
+  const fixture = await startFixtureServer({
+    "/": { html: "<!doctype html><title>Keep</title>" },
+    "/extra": { html: "<!doctype html><title>Drop</title>" },
+  });
+  const profileDirectory = await mkdtemp(join(tmpdir(), "mosaik-leftover-"));
+  const seed = await chromium.launchPersistentContext(profileDirectory, { headless: true });
+  try {
+    const first = seed.pages()[0] ?? (await seed.newPage());
+    await first.goto(fixture.url, { waitUntil: "domcontentloaded" });
+    const extra = await seed.newPage();
+    await extra.goto(new URL("/extra", fixture.url).href, { waitUntil: "domcontentloaded" });
+    assert.ok(seed.pages().length >= 2);
+  } finally {
+    await seed.close();
+  }
+  const session = await openInteractiveBrowserSession({
+    startUrl: fixture.url,
+    profileDirectory,
+    headless: true,
+  });
+  try {
+    await session.withPage(async (page) => {
+      assert.equal(
+        page
+          .context()
+          .pages()
+          .filter((candidate) => !candidate.isClosed()).length,
+        1,
+      );
     });
   } finally {
     await session.close();
@@ -91,6 +154,24 @@ test("shared-context sessions retain authentication state between tasks", async 
   }
 });
 
+test("browser session environment exposes Camoufox options instead of a CDP endpoint", () => {
+  assert.deepEqual(
+    browserSessionEnvironment({
+      kind: "ephemeral",
+      provider: "camoufox",
+      camoufox: { os: "linux", humanize: true },
+      withPage: async <T>(): Promise<T> => {
+        throw new Error("not used");
+      },
+      close: async () => {},
+    }),
+    {
+      MOSAIK_BROWSER: "camoufox",
+      MOSAIK_CAMOUFOX_OPTIONS: JSON.stringify({ os: "linux", humanize: true }),
+    },
+  );
+});
+
 test("browser session environment exposes only an explicit CDP endpoint", () => {
   assert.deepEqual(
     browserSessionEnvironment({
@@ -103,4 +184,15 @@ test("browser session environment exposes only an explicit CDP endpoint", () => 
     }),
     { MOSAIK_CDP_WS_URL: "wss://browser.example.test/token" },
   );
+});
+
+test("browser sessions humanize pages only when enabled", async () => {
+  const regular = await openBrowserSession();
+  const humanized = await openBrowserSession({ humanize: true });
+  try {
+    await regular.withPage(async (page) => assert.equal(isPageHumanized(page), false));
+    await humanized.withPage(async (page) => assert.equal(isPageHumanized(page), true));
+  } finally {
+    await Promise.all([regular.close(), humanized.close()]);
+  }
 });

@@ -9,8 +9,15 @@ import type {
 } from "../types.js";
 import { boundedEvidence, parseTaskOutcome, type OutcomeReview } from "../outcome.js";
 import { DISCOVERY_PROFILE } from "./discovery-profile.js";
+import { patchDshProfile } from "./llm-route.js";
 import { dshResourcePath, resolveDshCommand } from "./paths.js";
-import { analyzeAgentEvents, loadDshEvents, runDshChild, type DshReasoning } from "./session.js";
+import {
+  analyzeAgentEvents,
+  loadDshEvents,
+  runDshChild,
+  sessionTurnEnded,
+  type DshReasoning,
+} from "./session.js";
 
 const PERSONA = `      Assess whether execution fulfilled the original user request, then call finishOutcome exactly once.
       When origin is discovery, the saved automation has NOT executed. Use only discoveryObservations and pageNavigation to assess the actual task. Observed extraction outputs can ground an answer; a saved action does not prove an interaction occurred or a workflow completed. Do not claim execution of loops, side effects, file generation, or automation logic absent direct evidence. The request defines success. A automation running without errors does not prove success. Inspect action results, returned data, and file metadata. Empty collections are valid for requests to list matching records when the evidence supports no matches. They are insufficient for a request requiring an explanation grounded in documents that were never collected. Do not infer that no matches exist merely because a filter discarded all links.
@@ -26,16 +33,12 @@ export async function reviewTaskOutcome(
   reasoning: DshReasoning,
 ): Promise<OutcomeReview> {
   await mkdir(directory, { recursive: true });
-  const profile = DISCOVERY_PROFILE.replace(
-    "__DSH_DISCOVERY_PLUGIN__",
-    JSON.stringify(dshResourcePath("composition-tools.js")),
-  )
-    .replace(/model: openai\/gpt-5\.6-luna:nitro/g, `model: ${model}`)
-    .replace("        reasoning: high", `        reasoning: ${reasoning}`)
-    .replace(
-      /      You discover a browser automation[\s\S]*?      After finishDiscovery returns discovered, STOP\./,
-      PERSONA,
-    );
+  const profile = patchDshProfile(DISCOVERY_PROFILE, {
+    model,
+    reasoning,
+    plugin: dshResourcePath("composition-tools.js"),
+    persona: PERSONA,
+  });
   const profilePath = join(directory, "profile.cordis.yml");
   await writeFile(profilePath, profile);
   const evidenceStore = new EvidenceStore();
@@ -83,8 +86,10 @@ export async function reviewTaskOutcome(
       DSH_TOOLS_MODE: "code",
     },
     async () => {
-      const analyzed = analyzeAgentEvents(await loadDshEvents(directory), 0);
+      const events = await loadDshEvents(directory);
+      const analyzed = analyzeAgentEvents(events, 0);
       return (
+        sessionTurnEnded(events) ||
         analyzed.terminalValues.some((value) => parseTaskOutcome(value) !== undefined) ||
         analyzed.metrics.modelRequests > request.budgets.maxModelRequests ||
         analyzed.metrics.codeExecutions > request.budgets.maxRunCodeExecutions ||

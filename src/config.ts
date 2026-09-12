@@ -1,7 +1,12 @@
 import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
+import { parseLlmProvider, resolveLlmRoute, type LlmProvider } from "./agents/dsh/llm-route.js";
+import { validateCamoufoxOptions, type CamoufoxOptions } from "./camoufox/options.js";
 import { domainMatches, normalizeDomain } from "./kernel/hosted-login.js";
+
+export const BROWSER_PROVIDERS = ["local", "kernel", "camoufox"] as const;
+export type BrowserProvider = (typeof BROWSER_PROVIDERS)[number];
 
 export interface InteractiveCliHistory {
   urls: string[];
@@ -19,7 +24,11 @@ export interface KernelAuthConnection {
 
 export interface MosaikConfig {
   version: 1;
-  browser?: "local" | "kernel";
+  browser?: BrowserProvider;
+  humanize?: boolean;
+  provider?: LlmProvider;
+  model?: string;
+  camoufox?: CamoufoxOptions;
   kernel?: {
     connections: Record<string, KernelAuthConnection>;
   };
@@ -54,17 +63,43 @@ export async function loadMosaikConfig(dataDirectory: string): Promise<MosaikCon
 
 export async function saveDefaultBrowser(
   dataDirectory: string,
-  browser: "local" | "kernel",
+  browser: BrowserProvider,
 ): Promise<string> {
   const config = await loadMosaikConfig(dataDirectory);
   return saveMosaikConfig(dataDirectory, { ...config, browser });
 }
 
+export async function saveHumanizationDefault(
+  dataDirectory: string,
+  humanize: boolean,
+): Promise<string> {
+  const config = await loadMosaikConfig(dataDirectory);
+  return saveMosaikConfig(dataDirectory, { ...config, humanize });
+}
+
+export async function saveDefaultModel(dataDirectory: string, model: string): Promise<string> {
+  const route = resolveLlmRoute(model);
+  const config = await loadMosaikConfig(dataDirectory);
+  return saveMosaikConfig(dataDirectory, {
+    ...config,
+    provider: route.provider,
+    model: route.model,
+  });
+}
+
 export function resolveMosaikBrowser(
-  explicit: "local" | "kernel" | undefined,
+  explicit: BrowserProvider | undefined,
   config: MosaikConfig,
-): "local" | "kernel" {
+): BrowserProvider {
   return explicit ?? config.browser ?? "local";
+}
+
+export function resolveHumanization(explicit: boolean | undefined, config: MosaikConfig): boolean {
+  return explicit ?? config.humanize ?? false;
+}
+
+export function isBrowserProvider(value: unknown): value is BrowserProvider {
+  return value === "local" || value === "kernel" || value === "camoufox";
 }
 
 export function findKernelAuthConnection(
@@ -123,11 +158,38 @@ function validateMosaikConfig(value: unknown): MosaikConfig {
   }
   const record = value as Record<string, unknown>;
   if (record.version !== 1) throw new Error("version must be 1");
-  if (record.browser !== undefined && record.browser !== "local" && record.browser !== "kernel") {
-    throw new Error("browser must be local or kernel");
+  if (record.browser !== undefined && !isBrowserProvider(record.browser)) {
+    throw new Error("browser must be local, kernel, or camoufox");
   }
+  if (record.humanize !== undefined && typeof record.humanize !== "boolean") {
+    throw new Error("humanize must be a boolean");
+  }
+  if (record.provider !== undefined && typeof record.provider !== "string") {
+    throw new Error("provider must be openrouter or openai-codex");
+  }
+  const provider = record.provider === undefined ? undefined : parseLlmProvider(record.provider);
+  if (record.model !== undefined) {
+    if (typeof record.model !== "string" || record.model.trim().length === 0) {
+      throw new Error("model must be a non-empty string");
+    }
+  }
+  const model = typeof record.model === "string" ? record.model.trim() : undefined;
+  if (provider !== undefined && model === undefined) {
+    throw new Error("model is required when provider is set");
+  }
+  const camoufox =
+    record.camoufox === undefined
+      ? undefined
+      : validateCamoufoxOptions(record.camoufox, "camoufox");
   if (record.kernel === undefined) {
-    return { version: 1, ...(record.browser === undefined ? {} : { browser: record.browser }) };
+    return {
+      version: 1,
+      ...(record.browser === undefined ? {} : { browser: record.browser }),
+      ...(record.humanize === undefined ? {} : { humanize: record.humanize }),
+      ...(provider === undefined ? {} : { provider }),
+      ...(model === undefined ? {} : { model }),
+      ...(camoufox === undefined || Object.keys(camoufox).length === 0 ? {} : { camoufox }),
+    };
   }
   if (record.kernel === null || typeof record.kernel !== "object" || Array.isArray(record.kernel)) {
     throw new Error("kernel must be an object");
@@ -150,6 +212,10 @@ function validateMosaikConfig(value: unknown): MosaikConfig {
   return {
     version: 1,
     ...(record.browser === undefined ? {} : { browser: record.browser }),
+    ...(record.humanize === undefined ? {} : { humanize: record.humanize }),
+    ...(provider === undefined ? {} : { provider }),
+    ...(model === undefined ? {} : { model }),
+    ...(camoufox === undefined || Object.keys(camoufox).length === 0 ? {} : { camoufox }),
     kernel: { connections },
   };
 }

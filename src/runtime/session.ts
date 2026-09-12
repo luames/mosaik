@@ -1,12 +1,16 @@
+import { createServer } from "node:net";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
-import { chmod, mkdir, readFile, mkdtemp, rm } from "node:fs/promises";
-import { chromium, type Browser, type Page } from "playwright";
+import { chmod, mkdir, readFile } from "node:fs/promises";
+import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import type { CamoufoxOptions } from "../camoufox/options.js";
 import { BrowserResponseCache, type CapturedBrowserResponse } from "./assets.js";
 import { PAGE_SIGNAL_INIT } from "./degraded.js";
+import { configurePageHumanization } from "./humanize.js";
 
 export interface BrowserSession {
   kind: "ephemeral" | "persistent";
+  provider?: "local" | "kernel" | "camoufox";
+  camoufox?: CamoufoxOptions;
   profileDirectory?: string;
   cdpEndpoint?: string;
   cdpTargetId?: string;
@@ -32,52 +36,38 @@ export interface InteractiveBrowserSession extends BrowserSession {
 export interface BrowserSessionOptions {
   profileDirectory?: string;
   headless?: boolean;
+  /** Humanize runtime input delivery without changing generated steps or saved source. */
+  humanize?: boolean;
+  browser?: "local" | "camoufox";
+  camoufox?: CamoufoxOptions;
 }
 
 export const MOSAIK_CDP_WS_URL_ENV = "MOSAIK_CDP_WS_URL";
+export const MOSAIK_BROWSER_ENV = "MOSAIK_BROWSER";
+export const MOSAIK_CAMOUFOX_OPTIONS_ENV = "MOSAIK_CAMOUFOX_OPTIONS";
 export const DEFAULT_REMOTE_STEP_TIMEOUT_MS = 5_000;
 const safelyHandledDialogPages = new WeakSet<Page>();
 
 export async function openBrowserSession(
   options: BrowserSessionOptions = {},
 ): Promise<BrowserSession> {
-  if (options.profileDirectory === undefined) {
-    const profileDirectory = await mkdtemp(join(tmpdir(), "mosaik-browser-"));
-    try {
-      const session = await openInteractiveBrowserSession({
-        startUrl: "about:blank",
-        profileDirectory,
-        headless: options.headless ?? true,
-      });
-      try {
-        const browser = await chromium.connectOverCDP(session.cdpEndpoint!);
-        return ephemeralSession(browser, {
-          cdpEndpoint: session.cdpEndpoint!,
-          close: async () => {
-            try {
-              await browser.close();
-            } finally {
-              try {
-                await session.close();
-              } finally {
-                await rm(profileDirectory, { recursive: true, force: true });
-              }
-            }
-          },
-        });
-      } catch (error) {
-        await session.close();
-        throw error;
-      }
-    } catch (error) {
-      await rm(profileDirectory, { recursive: true, force: true });
-      throw error;
-    }
+  if (options.browser === "camoufox") {
+    const { openCamoufoxBrowserSession } = await import("../camoufox/session.js");
+    return openCamoufoxBrowserSession(options);
   }
-  return openInteractiveBrowserSession({
-    startUrl: "about:blank",
-    profileDirectory: options.profileDirectory,
-    headless: options.headless ?? true,
+  if (options.profileDirectory !== undefined) {
+    return openInteractiveBrowserSession({
+      startUrl: "about:blank",
+      profileDirectory: options.profileDirectory,
+      headless: options.headless ?? true,
+      ...(options.humanize === undefined ? {} : { humanize: options.humanize }),
+    });
+  }
+  const launched = await launchCdpBrowser(options.headless ?? true);
+  return ephemeralSession(launched.browser, {
+    cdpEndpoint: launched.cdpEndpoint,
+    close: () => launched.browser.close(),
+    ...(options.humanize === undefined ? {} : { humanize: options.humanize }),
   });
 }
 
@@ -85,17 +75,22 @@ export async function openInteractiveBrowserSession(options: {
   startUrl: string;
   profileDirectory: string;
   headless?: boolean;
+  humanize?: boolean;
+  browser?: "local" | "camoufox";
+  camoufox?: CamoufoxOptions;
 }): Promise<InteractiveBrowserSession> {
+  if (options.browser === "camoufox") {
+    const { openCamoufoxInteractiveBrowserSession } = await import("../camoufox/session.js");
+    return openCamoufoxInteractiveBrowserSession(options);
+  }
   await prepareProfileDirectory(options.profileDirectory);
   const context = await chromium.launchPersistentContext(options.profileDirectory, {
     headless: options.headless ?? false,
     args: ["--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1"],
   });
   await context.addInitScript(PAGE_SIGNAL_INIT);
-  const initialPage =
-    context.pages().find((candidate) => candidate.url() === "about:blank") ??
-    context.pages().find((candidate) => !candidate.isClosed()) ??
-    (await context.newPage());
+  const initialPage = await adoptSinglePage(context, options.startUrl);
+  await configurePageHumanization(initialPage, options.humanize ?? false);
   installSafeDialogHandler(initialPage);
   const [port] = (await readFile(join(options.profileDirectory, "DevToolsActivePort"), "utf8"))
     .trim()
@@ -118,6 +113,7 @@ export async function openInteractiveBrowserSession(options: {
     if (!page.isClosed()) return page;
     responses.close();
     page = context.pages().find((candidate) => !candidate.isClosed()) ?? (await context.newPage());
+    await configurePageHumanization(page, options.humanize ?? false);
     installSafeDialogHandler(page);
     responses = new BrowserResponseCache(
       page,
@@ -152,6 +148,10 @@ export function isBrowserSession(value: Browser | BrowserSession): value is Brow
 }
 
 export async function openAgentBrowser(): Promise<Browser> {
+  if (process.env[MOSAIK_BROWSER_ENV] === "camoufox") {
+    const { openCamoufoxAgentBrowser } = await import("../camoufox/session.js");
+    return openCamoufoxAgentBrowser();
+  }
   const endpoint = process.env[MOSAIK_CDP_WS_URL_ENV];
   return endpoint === undefined || endpoint.length === 0
     ? chromium.launch({ headless: true })
@@ -165,6 +165,12 @@ export async function connectBrowserSessionOverCdp(cdpEndpoint: string): Promise
 }
 
 export function browserSessionEnvironment(session: Browser | BrowserSession): NodeJS.ProcessEnv {
+  if (isBrowserSession(session) && session.provider === "camoufox") {
+    return {
+      [MOSAIK_BROWSER_ENV]: "camoufox",
+      [MOSAIK_CAMOUFOX_OPTIONS_ENV]: JSON.stringify(session.camoufox ?? {}),
+    };
+  }
   return isBrowserSession(session) && session.cdpEndpoint !== undefined
     ? {
         [MOSAIK_CDP_WS_URL_ENV]: session.cdpEndpoint,
@@ -179,6 +185,7 @@ export function ephemeralSession(
     cdpEndpoint?: string;
     close?: () => Promise<void>;
     defaultStepTimeoutMs?: number;
+    humanize?: boolean;
   } = {},
 ): BrowserSession {
   const defaultStepTimeoutMs =
@@ -193,6 +200,7 @@ export function ephemeralSession(
       await context.addInitScript(PAGE_SIGNAL_INIT);
       try {
         const page = await context.newPage();
+        await configurePageHumanization(page, options.humanize ?? false);
         installSafeDialogHandler(page);
         return await run(page);
       } finally {
@@ -210,12 +218,14 @@ export async function sharedContextSession(
     cdpEndpoint?: string;
     close?: () => Promise<void>;
     defaultStepTimeoutMs?: number;
+    humanize?: boolean;
   } = {},
 ): Promise<BrowserSession> {
   const context = browser.contexts()[0] ?? (await browser.newContext());
   await context.addInitScript(PAGE_SIGNAL_INIT);
   let page =
     context.pages().find((candidate) => !candidate.isClosed()) ?? (await context.newPage());
+  await configurePageHumanization(page, options.humanize ?? false);
   installSafeDialogHandler(page);
   const defaultStepTimeoutMs =
     options.defaultStepTimeoutMs ??
@@ -224,6 +234,7 @@ export async function sharedContextSession(
   const activePage = async (): Promise<Page> => {
     if (!page.isClosed()) return page;
     page = context.pages().find((candidate) => !candidate.isClosed()) ?? (await context.newPage());
+    await configurePageHumanization(page, options.humanize ?? false);
     installSafeDialogHandler(page);
     return page;
   };
@@ -242,6 +253,67 @@ export async function sharedContextSession(
 async function prepareProfileDirectory(profileDirectory: string): Promise<void> {
   await mkdir(profileDirectory, { recursive: true, mode: 0o700 });
   if (process.platform !== "win32") await chmod(profileDirectory, 0o700);
+}
+
+async function launchCdpBrowser(
+  headless: boolean,
+): Promise<{ browser: Browser; cdpEndpoint: string }> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const port = await reserveLoopbackPort();
+    try {
+      const browser = await chromium.launch({
+        executablePath: chromium.executablePath(),
+        headless,
+        args: [`--remote-debugging-port=${port}`, "--remote-debugging-address=127.0.0.1"],
+      });
+      return { browser, cdpEndpoint: `http://127.0.0.1:${port}` };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("Failed to launch Chromium");
+}
+
+async function reserveLoopbackPort(): Promise<number> {
+  const server = createServer();
+  server.unref();
+  return await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (address === null || typeof address === "string") {
+        server.close();
+        reject(new Error("Could not reserve a local debugging port"));
+        return;
+      }
+      const port = address.port;
+      server.close((error) => (error === undefined ? resolve(port) : reject(error)));
+    });
+  });
+}
+
+async function adoptSinglePage(context: BrowserContext, startUrl: string): Promise<Page> {
+  const existing = context.pages().filter((page) => !page.isClosed());
+  const page =
+    existing.find((candidate) => samePageUrl(candidate.url(), startUrl)) ??
+    existing.find((candidate) => candidate.url() === "about:blank") ??
+    existing[0] ??
+    (await context.newPage());
+  await Promise.all(
+    existing
+      .filter((candidate) => candidate !== page && !candidate.isClosed())
+      .map((extra) => extra.close()),
+  );
+  return page;
+}
+
+function samePageUrl(left: string, right: string): boolean {
+  try {
+    return new URL(left).href === new URL(right).href;
+  } catch {
+    return left === right;
+  }
 }
 
 /** Attach only the invocation-owned target. Never select another user's tab. */
