@@ -48,7 +48,6 @@ cd mosaik
 pnpm install
 pnpm run build
 pnpm add --global .
-npx playwright install chromium
 mosaik setup
 mosaik doctor
 ```
