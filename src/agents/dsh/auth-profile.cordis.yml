@@ -22,6 +22,8 @@
               thinkingFormat: openrouter
               supportsDeveloperRole: true
               requiresReasoningContentOnAssistantMessages: false
+      openai-codex:
+        reasoning: low
 
 - id: agent-default-model
   config:

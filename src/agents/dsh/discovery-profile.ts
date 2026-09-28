@@ -35,6 +35,8 @@ export const DISCOVERY_PROFILE = `# DSH-specific Code Mode configuration stays i
               thinkingFormat: openrouter
               supportsDeveloperRole: false
               requiresReasoningContentOnAssistantMessages: true
+      openai-codex:
+        reasoning: high
 
 - id: agent-default-model
   config:

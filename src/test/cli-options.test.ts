@@ -3,8 +3,11 @@ import { resolve } from "node:path";
 import { test } from "vitest";
 import {
   parseActionsCliArgs,
+  parseConfigCliArgs,
   parseDoctorCliArgs,
+  parseInteractiveCliArgs,
   parseKernelCliArgs,
+  parseProviderCliArgs,
   parsePullCliArgs,
   parseRunCliArgs,
 } from "../cli-options.js";
@@ -40,6 +43,41 @@ test("run CLI parses typed inputs and defaults the site to the URL host", () => 
   });
 });
 
+test("interactive CLI accepts a model flag", () => {
+  assert.deepEqual(parseInteractiveCliArgs([]), { help: false, options: {} });
+  assert.deepEqual(parseInteractiveCliArgs(["--model", "gpt-5.6-luna"]), {
+    help: false,
+    options: { model: "gpt-5.6-luna" },
+  });
+  assert.throws(
+    () => parseInteractiveCliArgs(["--model", "openai-codex/gpt-5.3-codex-spark"]),
+    /only gpt-5\.6-luna/,
+  );
+  assert.deepEqual(parseInteractiveCliArgs(["--help"]), { help: true });
+  assert.throws(() => parseInteractiveCliArgs(["--model", ""]), /model id is required/);
+});
+
+test("config CLI sets browser and model defaults", () => {
+  assert.deepEqual(parseConfigCliArgs(["set", "browser", "kernel"], "/project"), {
+    help: false,
+    options: {
+      setting: "browser",
+      browser: "kernel",
+      dataDirectory: resolve("/project/.mosaik"),
+    },
+  });
+  assert.deepEqual(parseConfigCliArgs(["set", "model", "luna"], "/project"), {
+    help: false,
+    options: {
+      setting: "model",
+      model: "luna",
+      dataDirectory: resolve("/project/.mosaik"),
+    },
+  });
+  assert.deepEqual(parseConfigCliArgs(["--help"]), { help: true });
+  assert.throws(() => parseConfigCliArgs(["set", "browser"]), /Usage/);
+});
+
 test("run CLI accepts explicit IDs, model, and data directory", () => {
   const parsed = parseRunCliArgs(
     [
@@ -68,6 +106,19 @@ test("run CLI accepts explicit IDs, model, and data directory", () => {
   assert.equal(parsed.options.json, true);
 });
 
+test("run CLI accepts Camoufox as a browser provider", () => {
+  const parsed = parseRunCliArgs([
+    "Search",
+    "--url",
+    "https://example.test",
+    "--browser",
+    "camoufox",
+  ]);
+  assert.equal(parsed.help, false);
+  if (parsed.help) return;
+  assert.equal(parsed.options.browser, "camoufox");
+});
+
 test("run CLI accepts Kernel browser settings", () => {
   const parsed = parseRunCliArgs([
     "Search",
@@ -87,6 +138,22 @@ test("run CLI accepts Kernel browser settings", () => {
   assert.equal(parsed.options.kernelProfile, "mosaik-test");
   assert.equal(parsed.options.kernelStealth, true);
   assert.equal(parsed.options.kernelTimeoutSeconds, 900);
+});
+
+test("run CLI enables humanized execution only when requested", () => {
+  const enabled = parseRunCliArgs(["Search", "--url", "https://example.test", "--humanize"]);
+  assert.equal(enabled.help, false);
+  if (!enabled.help) assert.equal(enabled.options.humanize, true);
+
+  const disabled = parseRunCliArgs(["Search", "--url", "https://example.test", "--no-humanize"]);
+  assert.equal(disabled.help, false);
+  if (!disabled.help) assert.equal(disabled.options.humanize, false);
+
+  assert.throws(
+    () =>
+      parseRunCliArgs(["Search", "--url", "https://example.test", "--humanize", "--no-humanize"]),
+    /either --humanize or --no-humanize/,
+  );
 });
 
 test("run CLI keeps an omitted browser unset and accepts an auth connection override", () => {
@@ -131,12 +198,22 @@ test("run CLI help has no required arguments and invalid inputs fail early", () 
   );
   assert.throws(
     () => parseRunCliArgs(["Task", "--url", "https://example.test", "--browser", "remote"]),
-    /local.*kernel/,
+    /local.*camoufox.*kernel/,
   );
   assert.throws(
     () => parseRunCliArgs(["Task", "--url", "https://example.test", "--kernel-timeout", "9"]),
     /between 10 and 259200/,
   );
+});
+
+test("config CLI accepts Camoufox as the default browser", () => {
+  const parsed = parseConfigCliArgs(["set", "browser", "camoufox"], "/project");
+  assert.equal(parsed.help, false);
+  if (parsed.help) return;
+  assert.equal(parsed.options.setting, "browser");
+  assert.equal(parsed.options.browser, "camoufox");
+  assert.equal(parsed.options.dataDirectory, resolve("/project/.mosaik"));
+  assert.throws(() => parseConfigCliArgs(["set", "browser", "remote"]), /local.*camoufox.*kernel/);
 });
 
 test("actions and doctor CLI options resolve data paths from the workspace", () => {
@@ -158,6 +235,19 @@ test("actions and doctor CLI options resolve data paths from the workspace", () 
     dataDirectory: resolve("/project/state"),
   });
   assert.equal(parseDoctorCliArgs(["--json"]).json, true);
+});
+
+test("config CLI accepts a persistent humanization default", () => {
+  const enabled = parseConfigCliArgs(["set", "humanize", "true"], "/project");
+  assert.deepEqual(enabled, {
+    help: false,
+    options: {
+      setting: "humanize",
+      value: true,
+      dataDirectory: resolve("/project/.mosaik"),
+    },
+  });
+  assert.throws(() => parseConfigCliArgs(["set", "humanize", "yes"]), /true or false/);
 });
 
 test("kernel deploy defaults to the project env file and parses deployment options", () => {
@@ -229,4 +319,22 @@ test("pull CLI parses backend-agnostic synchronization options", () => {
   }
   assert.deepEqual(parsePullCliArgs(["--help"]), { help: true });
   assert.throws(() => parsePullCliArgs(["--namespace", "invalid namespace"]), /namespace/);
+});
+
+test("provider CLI parses login, status, and logout", () => {
+  assert.deepEqual(parseProviderCliArgs(["--help"]), { help: true });
+  assert.deepEqual(parseProviderCliArgs(["login"]), {
+    help: false,
+    options: { action: "login" },
+  });
+  assert.deepEqual(parseProviderCliArgs(["status"]), {
+    help: false,
+    options: { action: "status" },
+  });
+  assert.deepEqual(parseProviderCliArgs(["logout"]), {
+    help: false,
+    options: { action: "logout" },
+  });
+  assert.throws(() => parseProviderCliArgs(["revoke"]), /login\|status\|logout/);
+  assert.throws(() => parseProviderCliArgs(["login", "--from-codex"]), /Unknown option/);
 });

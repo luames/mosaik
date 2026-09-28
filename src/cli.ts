@@ -12,10 +12,20 @@ import { chromium, type Browser } from "playwright";
 import Kernel from "@onkernel/sdk";
 import { DshAuthSuccessAgent } from "./agents/dsh/auth-agent.js";
 import { DshCapabilityCompositionAgent } from "./agents/dsh/composition-agent.js";
+import {
+  DEFAULT_LLM_MODEL,
+  formatLlmRouteLabel,
+  llmModelFlag,
+  OPENAI_CODEX_MODEL,
+  resolveConfiguredLlmRoute,
+  resolveLlmRoute,
+} from "./agents/dsh/llm-route.js";
 import { dshResourcePath, resolveDshCommand } from "./agents/dsh/paths.js";
 import { loadProjectEnv } from "./agents/dsh/session.js";
 import { authAutomationId } from "./auth/automation.js";
-import { localBrowserProfileDirectory } from "./auth/profile.js";
+import { camoufoxBrowserProfileDirectory, localBrowserProfileDirectory } from "./auth/profile.js";
+import { inspectCamoufoxInstall, camoufoxFetchCommand } from "./camoufox/install.js";
+import type { CamoufoxOptions } from "./camoufox/options.js";
 import { applySavedAuthentication, findAuthAutomationForUrl } from "./auth/session.js";
 import { runLoginCommand } from "./auth/cli.js";
 import { createProfileCredentialPrompter, profileCredentialsPath } from "./auth/credentials.js";
@@ -23,6 +33,7 @@ import { loginWithBrowserSession } from "./auth/login.js";
 import { describeAuthSuccessCondition } from "./auth/success.js";
 import { createTerminalCredentialPrompter } from "./auth/terminal.js";
 import {
+  progressLabel,
   runInteractiveCli,
   type InteractiveCliResult,
   type InteractiveCliSession,
@@ -34,13 +45,17 @@ import {
   INIT_CLI_HELP,
   KERNEL_CLI_HELP,
   PULL_CLI_HELP,
+  INTERACTIVE_CLI_HELP,
   parseActionsCliArgs,
   parseConfigCliArgs,
   parseDoctorCliArgs,
   parseInitCliArgs,
+  parseInteractiveCliArgs,
   parseKernelCliArgs,
+  parseProviderCliArgs,
   parsePullCliArgs,
   parseRunCliArgs,
+  PROVIDER_CLI_HELP,
   RUN_CLI_HELP,
   type RunCliOptions,
 } from "./cli-options.js";
@@ -57,10 +72,18 @@ import {
 } from "./cli-ui.js";
 import { loadInteractiveCliHistory, saveInteractiveCliHistory } from "./config.js";
 import {
+  deleteOpenAICodexGrant,
+  loginOpenAICodexOAuth,
+  openaiCodexStatus,
+} from "./provider/openai-codex.js";
+import {
   findKernelAuthConnection,
   loadMosaikConfig,
+  resolveHumanization,
   resolveMosaikBrowser,
   saveDefaultBrowser,
+  saveDefaultModel,
+  saveHumanizationDefault,
 } from "./config.js";
 import { composeAndRun } from "./composition/index.js";
 import { initializeMosaikProject } from "./init.js";
@@ -89,6 +112,7 @@ const COMMANDS = [
   "init",
   "run",
   "login",
+  "provider",
   "actions",
   "pull",
   "reset",
@@ -101,21 +125,8 @@ const COMMANDS = [
 export async function main(args: string[], workingDirectory = process.cwd()): Promise<number> {
   const [command, ...rest] = args;
   switch (command) {
-    case undefined: {
-      const version = await packageVersion();
-      if (process.stdin.isTTY && process.stdout.isTTY) {
-        const history = await loadInteractiveCliHistory(workingDirectory);
-        return runInteractiveCli({
-          version,
-          workingDirectory,
-          history,
-          saveHistory: (next) => saveInteractiveCliHistory(workingDirectory, next).then(() => {}),
-          openSession: (startUrl) => openInteractiveCliSession(startUrl, workingDirectory),
-        });
-      }
-      process.stdout.write(renderRootHelp(version));
-      return 0;
-    }
+    case undefined:
+      return interactiveCommand(args, workingDirectory);
     case "--help":
     case "-h":
       process.stdout.write(renderRootHelp(await packageVersion()));
@@ -130,6 +141,8 @@ export async function main(args: string[], workingDirectory = process.cwd()): Pr
       return initCommand(rest, workingDirectory);
     case "login":
       return runLoginCommand(rest, workingDirectory);
+    case "provider":
+      return providerCommand(rest, workingDirectory);
     case "config":
       return configCommand(rest, workingDirectory);
     case "actions":
@@ -145,6 +158,7 @@ export async function main(args: string[], workingDirectory = process.cwd()): Pr
     case "kernel":
       return kernelCommand(rest, workingDirectory);
     default:
+      if (command.startsWith("-")) return interactiveCommand(args, workingDirectory);
       throw new Error(unknownCommandMessage(command));
   }
 }
@@ -226,12 +240,22 @@ async function kernelCommand(args: string[], workingDirectory: string): Promise<
 async function openInteractiveCliSession(
   startUrl: string,
   workingDirectory: string,
+  options: { model: string },
 ): Promise<InteractiveCliSession> {
   const dataDirectory = resolve(workingDirectory, ".mosaik");
-  const profileDirectory = localBrowserProfileDirectory(dataDirectory, startUrl);
+  const config = await loadMosaikConfig(dataDirectory);
+  const configured = resolveMosaikBrowser(undefined, config);
+  const browserProvider = configured === "camoufox" ? "camoufox" : "local";
+  const profileDirectory =
+    browserProvider === "camoufox"
+      ? camoufoxBrowserProfileDirectory(dataDirectory, startUrl)
+      : localBrowserProfileDirectory(dataDirectory, startUrl);
   const browserSession = await openInteractiveBrowserSession({
     startUrl,
     profileDirectory,
+    browser: browserProvider,
+    humanize: resolveHumanization(undefined, config),
+    ...(config.camoufox === undefined ? {} : { camoufox: config.camoufox }),
   });
   const runId = randomUUID();
   const runDirectory = resolve(dataDirectory, "runs", runId);
@@ -253,16 +277,21 @@ async function openInteractiveCliSession(
     await browserSession.close();
     throw error;
   }
-  const agent = new DshCapabilityCompositionAgent(
-    browserSession,
-    repository,
-    dataDirectory,
-    workingDirectory,
-  );
+  let model = options.model;
+  const createAgent = (next: string) =>
+    new DshCapabilityCompositionAgent(browserSession, repository, dataDirectory, workingDirectory, {
+      model: next,
+    });
+  let agent = createAgent(model);
 
   return {
     id: runId,
     currentUrl: () => browserSession.currentUrl(),
+    model: () => model,
+    setModel(next) {
+      model = next.trim();
+      agent = createAgent(model);
+    },
     async run(task, options): Promise<InteractiveCliResult> {
       await applySavedAuthentication(browserSession, repository, browserSession.currentUrl());
       const current = new URL(browserSession.currentUrl());
@@ -295,6 +324,7 @@ async function openInteractiveCliSession(
         ),
         successAgent: new DshAuthSuccessAgent(workingDirectory, {
           runRoot: resolve(runDirectory, "login"),
+          model,
         }),
         ...(savedAutomation === undefined ? {} : { savedAutomation }),
         onAuthenticatedPage: async (_page, authenticated) => {
@@ -376,14 +406,96 @@ async function initCommand(args: string[], workingDirectory: string): Promise<nu
   return 0;
 }
 
+async function interactiveCommand(args: string[], workingDirectory: string): Promise<number> {
+  const parsed = parseInteractiveCliArgs(args);
+  if (parsed.help) {
+    process.stdout.write(INTERACTIVE_CLI_HELP);
+    return 0;
+  }
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    process.stdout.write(renderRootHelp(await packageVersion()));
+    return 0;
+  }
+  const dataDirectory = resolve(workingDirectory, ".mosaik");
+  const config = await loadMosaikConfig(dataDirectory);
+  const configured = resolveConfiguredLlmRoute(config);
+  let model =
+    parsed.options.model ??
+    (configured === undefined ? DEFAULT_LLM_MODEL : llmModelFlag(configured));
+  if (parsed.options.model !== undefined) {
+    const route = resolveLlmRoute(parsed.options.model);
+    await saveDefaultModel(dataDirectory, parsed.options.model);
+    model = llmModelFlag(route);
+  }
+  const history = await loadInteractiveCliHistory(workingDirectory);
+  return runInteractiveCli({
+    version: await packageVersion(),
+    workingDirectory,
+    model,
+    history,
+    saveHistory: (next) => saveInteractiveCliHistory(workingDirectory, next).then(() => {}),
+    async setModel(next) {
+      const route = resolveLlmRoute(next);
+      await saveDefaultModel(dataDirectory, next);
+      model = llmModelFlag(route);
+      return model;
+    },
+    openSession: (startUrl) => openInteractiveCliSession(startUrl, workingDirectory, { model }),
+  });
+}
+
 async function configCommand(args: string[], workingDirectory: string): Promise<number> {
   const parsed = parseConfigCliArgs(args, workingDirectory);
   if (parsed.help) {
     process.stdout.write(CONFIG_CLI_HELP);
     return 0;
   }
+  if (parsed.options.setting === "model") {
+    const route = resolveLlmRoute(parsed.options.model);
+    const path = await saveDefaultModel(parsed.options.dataDirectory, parsed.options.model);
+    process.stdout.write(`Saved ${route.provider} model ${route.model} to ${path}\n`);
+    return 0;
+  }
+  if (parsed.options.setting === "humanize") {
+    const path = await saveHumanizationDefault(parsed.options.dataDirectory, parsed.options.value);
+    process.stdout.write(`Saved humanize default ${String(parsed.options.value)} to ${path}\n`);
+    return 0;
+  }
   const path = await saveDefaultBrowser(parsed.options.dataDirectory, parsed.options.browser);
   process.stdout.write(`Saved browser default ${parsed.options.browser} to ${path}\n`);
+  return 0;
+}
+
+async function providerCommand(args: string[], workingDirectory: string): Promise<number> {
+  const parsed = parseProviderCliArgs(args);
+  if (parsed.help) {
+    process.stdout.write(PROVIDER_CLI_HELP);
+    return 0;
+  }
+  if (parsed.options.action === "status") {
+    const status = await openaiCodexStatus();
+    process.stdout.write(
+      status.signedIn
+        ? `OpenAI Codex is signed in (${status.path})\n`
+        : `OpenAI Codex is not signed in. Run mosaik provider login.\n`,
+    );
+    return status.signedIn ? 0 : 1;
+  }
+  if (parsed.options.action === "logout") {
+    const result = await deleteOpenAICodexGrant();
+    process.stdout.write(
+      result.deleted
+        ? `Signed out of OpenAI Codex (${result.path})\n`
+        : `OpenAI Codex is not signed in (${result.path})\n`,
+    );
+    return 0;
+  }
+  const result = await loginOpenAICodexOAuth();
+  const dataDirectory = resolve(workingDirectory, ".mosaik");
+  const configPath = await saveDefaultModel(dataDirectory, OPENAI_CODEX_MODEL);
+  process.stdout.write(
+    `Signed in to OpenAI Codex\n  Account  ${result.accountId}\n  Store    ${result.path}\n  Model    ${formatLlmRouteLabel(OPENAI_CODEX_MODEL)}\n           ${configPath}\n`,
+  );
   return 0;
 }
 
@@ -396,11 +508,15 @@ async function runCommand(args: string[], workingDirectory: string): Promise<num
   const options = parsed.options;
   const config = await loadMosaikConfig(options.dataDirectory);
   const browserProvider = resolveMosaikBrowser(options.browser, config);
-  if (browserProvider === "local" && options.kernelAuthConnection !== undefined) {
+  const humanize = resolveHumanization(options.humanize, config);
+  if (browserProvider !== "kernel" && options.kernelAuthConnection !== undefined) {
     throw new Error("--kernel-auth-connection requires --browser kernel");
   }
-  if (browserProvider === "local" && options.kernelProfile !== undefined) {
+  if (browserProvider !== "kernel" && options.kernelProfile !== undefined) {
     throw new Error("--kernel-profile requires --browser kernel");
+  }
+  if (browserProvider !== "kernel" && options.kernelStealth) {
+    throw new Error("--kernel-stealth requires --browser kernel");
   }
   const store = openFileRepository({
     dataRoot: options.dataDirectory,
@@ -427,39 +543,56 @@ async function runCommand(args: string[], workingDirectory: string): Promise<num
     );
   }
   const savedLocalAuthentication =
-    browserProvider === "local"
-      ? await findAuthAutomationForUrl(store, options.startUrl)
-      : undefined;
+    browserProvider === "kernel"
+      ? undefined
+      : await findAuthAutomationForUrl(store, options.startUrl);
+  const camoufoxOptions = config.camoufox;
   const browser = await reporter.task<Browser | BrowserSession>(
     {
       active:
         browserProvider === "kernel"
           ? "Opening a Kernel browser"
-          : `Opening Chromium${options.headless ? " in headless mode" : ""}`,
-      done: browserProvider === "kernel" ? "Kernel browser ready" : "Chromium ready",
+          : browserProvider === "camoufox"
+            ? `Opening Camoufox${options.headless ? " in headless mode" : ""}`
+            : `Opening Chromium${options.headless ? " in headless mode" : ""}`,
+      done:
+        browserProvider === "kernel"
+          ? "Kernel browser ready"
+          : browserProvider === "camoufox"
+            ? "Camoufox ready"
+            : "Chromium ready",
     },
     () =>
       browserProvider === "kernel"
         ? openKernelBrowserSession({
             ...(kernel === undefined ? {} : { client: kernel }),
             headless: options.headless,
+            humanize,
             stealth: options.kernelStealth,
             timeoutSeconds: options.kernelTimeoutSeconds,
             ...(resolvedProfile === undefined ? {} : { profileName: resolvedProfile }),
           })
         : savedLocalAuthentication === undefined
-          ? openBrowserSession({ headless: options.headless })
+          ? openBrowserSession({
+              headless: options.headless,
+              humanize,
+              browser: browserProvider,
+              ...camoufoxSessionOptions(camoufoxOptions),
+            })
           : openInteractiveBrowserSession({
               startUrl: options.startUrl,
-              profileDirectory: localBrowserProfileDirectory(
-                options.dataDirectory,
-                options.startUrl,
-              ),
+              profileDirectory:
+                browserProvider === "camoufox"
+                  ? camoufoxBrowserProfileDirectory(options.dataDirectory, options.startUrl)
+                  : localBrowserProfileDirectory(options.dataDirectory, options.startUrl),
               headless: options.headless,
+              humanize,
+              browser: browserProvider,
+              ...camoufoxSessionOptions(camoufoxOptions),
             }),
   );
   try {
-    if (browserProvider === "local" && savedLocalAuthentication !== undefined) {
+    if (browserProvider !== "kernel" && savedLocalAuthentication !== undefined) {
       await applySavedAuthentication(browser as InteractiveBrowserSession, store, options.startUrl);
     }
     const agent = new DshCapabilityCompositionAgent(
@@ -471,13 +604,18 @@ async function runCommand(args: string[], workingDirectory: string): Promise<num
     );
     const result = await reporter.task(
       { active: `Planning task for ${options.siteId}`, done: "Browser task finished" },
-      () =>
+      (progress) =>
         composeAndRun(agent, {
           task: options.task,
           siteId: options.siteId,
           startUrl: options.startUrl,
           inputs: options.inputs,
           ...(options.automationId === undefined ? {} : { automationId: options.automationId }),
+          onProgress: (event) => {
+            const label = progressLabel(event);
+            if (event.kind !== "tool-result") reporter.note(label);
+            progress(label);
+          },
         }),
     );
     if (options.json) {
@@ -654,21 +792,28 @@ This cannot be undone by Mosaik. Type exactly "i know" to continue. Anything els
 
 async function setupCommand(args: string[]): Promise<number> {
   if (args.includes("--help") || args.includes("-h")) {
-    process.stdout.write("Usage:\n  mosaik setup\n");
+    process.stdout.write(
+      "Usage:\n  mosaik setup\n\nInstalls Playwright Chromium and fetches Camoufox.\n",
+    );
     return 0;
   }
   if (args.length > 0) throw new Error("mosaik setup does not accept arguments");
   const reporter = new TaskReporter();
   const packageRoot = dirname(require.resolve("playwright/package.json"));
   reporter.info("Installing Chromium with Playwright");
-  const exitCode = await spawnAndWait(process.execPath, [
+  const chromiumExit = await spawnAndWait(process.execPath, [
     resolve(packageRoot, "cli.js"),
     "install",
     "chromium",
   ]);
-  if (exitCode === 0) reporter.success("Chromium is ready");
+  if (chromiumExit === 0) reporter.success("Chromium is ready");
   else reporter.warning("Playwright could not install Chromium");
-  return exitCode;
+  const camoufox = camoufoxFetchCommand();
+  reporter.info("Fetching Camoufox with camoufox-js");
+  const camoufoxExit = await spawnAndWait(camoufox.executable, camoufox.args);
+  if (camoufoxExit === 0) reporter.success("Camoufox is ready");
+  else reporter.warning("camoufox-js could not fetch Camoufox");
+  return chromiumExit === 0 && camoufoxExit === 0 ? 0 : 1;
 }
 
 async function doctorCommand(args: string[], workingDirectory: string): Promise<number> {
@@ -680,6 +825,7 @@ async function doctorCommand(args: string[], workingDirectory: string): Promise<
   const version = await packageVersion();
   const keyAlreadySet = Boolean(process.env.OPENROUTER_API_KEY);
   await loadProjectEnv(workingDirectory);
+  const codex = await openaiCodexStatus();
   const checks: DoctorCheck[] = [];
   const nodeReady = nodeVersionAtLeast(22, 18);
   checks.push({
@@ -744,20 +890,38 @@ async function doctorCommand(args: string[], workingDirectory: string): Promise<
     ...(chromiumReady ? {} : { fix: "Run `mosaik setup` to install Chromium." }),
   });
 
+  const camoufox = await inspectCamoufoxInstall();
+  const camoufoxRequired = (await loadMosaikConfig(options.dataDirectory)).browser === "camoufox";
+  checks.push({
+    id: "camoufox",
+    label: "Camoufox",
+    status: camoufox.ready ? "pass" : camoufoxRequired ? "fail" : "warn",
+    detail: camoufox.detail,
+    ...(camoufox.ready ? {} : { fix: "Run `mosaik setup` to fetch Camoufox." }),
+  });
+
   const keyReady = Boolean(process.env.OPENROUTER_API_KEY);
+  const credentialsReady = keyReady || codex.signedIn;
   checks.push({
     id: "credentials",
-    label: "OPENROUTER_API_KEY",
-    status: keyReady ? "pass" : "fail",
-    detail: keyReady
-      ? keyAlreadySet
-        ? "set in environment"
-        : "loaded from .env"
-      : `not found in the shell or ${resolve(workingDirectory, ".env")}`,
-    ...(keyReady
+    label: "LLM credentials",
+    status: credentialsReady ? "pass" : "fail",
+    detail: credentialsReady
+      ? [
+          keyReady
+            ? keyAlreadySet
+              ? "OPENROUTER_API_KEY in environment"
+              : "OPENROUTER_API_KEY from .env"
+            : undefined,
+          codex.signedIn ? "OpenAI Codex signed in" : undefined,
+        ]
+          .filter((entry): entry is string => entry !== undefined)
+          .join("; ")
+      : `no OPENROUTER_API_KEY and no OpenAI Codex login`,
+    ...(credentialsReady
       ? {}
       : {
-          fix: `Add OPENROUTER_API_KEY=<your key> to ${resolve(workingDirectory, ".env")}, then run Mosaik again.`,
+          fix: `Add OPENROUTER_API_KEY to ${resolve(workingDirectory, ".env")}, or run \`mosaik provider login\`.`,
         }),
   });
 
@@ -869,6 +1033,12 @@ async function packageVersion(): Promise<string> {
   );
   if (typeof value !== "object" || value === null || !("version" in value)) return "unknown";
   return String(value.version);
+}
+
+function camoufoxSessionOptions(camoufox: CamoufoxOptions | undefined): {
+  camoufox?: CamoufoxOptions;
+} {
+  return camoufox === undefined ? {} : { camoufox };
 }
 
 function unknownCommandMessage(command: string): string {

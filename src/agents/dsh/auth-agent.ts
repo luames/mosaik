@@ -14,6 +14,8 @@ import {
   type DshReasoning,
 } from "./session.js";
 import { dshResourcePath, resolveDshCommand } from "./paths.js";
+import { DEFAULT_LLM_MODEL, patchDshProfile } from "./llm-route.js";
+import { assertLlmCredentials } from "../../provider/openai-codex.js";
 
 export class DshAuthSuccessAgent implements AuthSuccessAgent {
   constructor(
@@ -23,11 +25,8 @@ export class DshAuthSuccessAgent implements AuthSuccessAgent {
 
   async inferSuccess(request: AuthSuccessAgentRequest): Promise<AuthSuccessAgentDecision> {
     await loadProjectEnv(this.projectRoot);
-    if (!process.env.OPENROUTER_API_KEY) {
-      throw new Error("OPENROUTER_API_KEY is required for authentication success inference");
-    }
-    const model =
-      this.options.model ?? process.env.MOSAIK_AUTH_MODEL ?? "openai/gpt-5.6-luna:nitro";
+    const model = this.options.model ?? process.env.MOSAIK_AUTH_MODEL ?? DEFAULT_LLM_MODEL;
+    await assertLlmCredentials(model);
     const reasoning = this.options.reasoning ?? "low";
     const runDirectory = resolve(
       this.options.runRoot ?? resolve(this.projectRoot, ".dsh-poc-runs"),
@@ -35,9 +34,7 @@ export class DshAuthSuccessAgent implements AuthSuccessAgent {
     );
     await mkdir(runDirectory, { recursive: true });
     const template = await readFile(dshResourcePath("auth-profile.cordis.yml"), "utf8");
-    const profile = template
-      .replace(/model: openai\/gpt-5\.6-luna:nitro/g, `model: ${model}`)
-      .replace("        reasoning: low", `        reasoning: ${reasoning}`);
+    const profile = patchDshProfile(template, { model, reasoning });
     const profilePath = resolve(runDirectory, "auth-profile.cordis.yml");
     await writeFile(profilePath, profile, "utf8");
     const dsh = resolveDshCommand();

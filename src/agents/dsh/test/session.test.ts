@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
-import { analyzeAgentEvents, dshFailureReason, runDshChild } from "../session.js";
+import { analyzeAgentEvents, dshFailureReason, runDshChild, sessionTurnEnded } from "../session.js";
 
 test("aborting a DSH child stops the active prompt process", async () => {
   const controller = new AbortController();
@@ -156,6 +156,42 @@ test("loader errors report the actual prerequisite failure", () => {
   assert.equal(
     dshFailureReason({ stdout: "", stderr: "", exitCode: 1 }, [error], "fallback"),
     "Discovery prerequisite collectLinks failed: Row 31 field href matched 0 elements",
+  );
+});
+
+test("a finished DSH turn stops the child even without a terminal tool result", async () => {
+  const eventRoot = await mkdtemp(join(tmpdir(), "mosaik-dsh-turn-end-"));
+  const startedAt = Date.now();
+  try {
+    const result = await runDshChild(
+      process.execPath,
+      [
+        "-e",
+        `const {writeFileSync}=require("node:fs");
+         const {join}=require("node:path");
+         writeFileSync(join(process.env.MOSAIK_TEST_EVENT_ROOT,"session.jsonl"), JSON.stringify({type:"turn/end",time:1})+"\\n");
+         setInterval(()=>{},1000);`,
+      ],
+      { ...process.env, MOSAIK_TEST_EVENT_ROOT: eventRoot },
+      undefined,
+      { eventRoot },
+    );
+    assert.equal(result.exitCode, 0);
+    assert.ok(Date.now() - startedAt < 2_000);
+  } finally {
+    await rm(eventRoot, { recursive: true, force: true });
+  }
+});
+
+test("a finished host turn stops waiting even when nested discovery also ended", () => {
+  assert.equal(sessionTurnEnded([{ type: "turn/end" }]), true);
+  assert.equal(sessionTurnEnded([{ type: "turn/end", nestedDiscovery: true }]), false);
+  assert.equal(
+    sessionTurnEnded([
+      { type: "turn/end", nestedDiscovery: true },
+      { type: "tool/code-dispatch-start", data: { name: "prepareComposition" } },
+    ]),
+    false,
   );
 });
 
